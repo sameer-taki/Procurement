@@ -1,0 +1,106 @@
+# docker-compose.traefik.yml  —  Golden on-prem host (Portainer deploys THIS file)
+# App name: procurement   Host: procurement.gml.com.fj
+# Conventions baked in (do not remove): joins shared external "web" network;
+# traefik.docker.network=web; NO published ports; FastAPI plain HTTP on 8000, Traefik does TLS.
+# Required Portainer env: APP_HOST, DB_PASSWORD, SECRET_KEY, ADMIN_USERNAME, ADMIN_PASSWORD
+# Optional (set when their phase lands): BC_*, KIWIPLAN_DSN, ACCURA_DSN, GRAPH_*, ENTRA_*
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      APP_ENV: "${APP_ENV:-production}"
+      DATABASE_URL: "postgresql+psycopg://fmp:${DB_PASSWORD:?}@db:5432/fmp"
+      SECRET_KEY: "${SECRET_KEY:?}"
+      FIRST_ADMIN_USERNAME: "${ADMIN_USERNAME:?}"
+      FIRST_ADMIN_PASSWORD: "${ADMIN_PASSWORD:?}"
+      FIRST_ADMIN_NAME: "Administrator"
+      # --- integrations (optional until their phase; safe to leave blank) ---
+      BC_BASE_URL: "${BC_BASE_URL:-}"
+      BC_COMPANY: "${BC_COMPANY:-}"
+      BC_USERNAME: "${BC_USERNAME:-}"
+      BC_PASSWORD: "${BC_PASSWORD:-}"
+      KIWIPLAN_DSN: "${KIWIPLAN_DSN:-}"
+      ACCURA_DSN: "${ACCURA_DSN:-}"
+      GRAPH_TENANT_ID: "${GRAPH_TENANT_ID:-}"
+      GRAPH_CLIENT_ID: "${GRAPH_CLIENT_ID:-}"
+      GRAPH_CLIENT_SECRET: "${GRAPH_CLIENT_SECRET:-}"
+      GRAPH_SENDER: "${GRAPH_SENDER:-no-reply@golden.com.fj}"
+      ENTRA_TENANT_ID: "${ENTRA_TENANT_ID:-}"
+      ENTRA_CLIENT_ID: "${ENTRA_CLIENT_ID:-}"
+      ENTRA_CLIENT_SECRET: "${ENTRA_CLIENT_SECRET:-}"
+      ENTRA_REDIRECT_URI: "${ENTRA_REDIRECT_URI:-}"
+    networks:
+      - web
+      - default
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=web"
+      - "traefik.http.routers.procurement.rule=Host(`${APP_HOST:?}`)"
+      - "traefik.http.routers.procurement.entrypoints=websecure"
+      - "traefik.http.routers.procurement.tls=true"
+      - "traefik.http.services.procurement.loadbalancer.server.port=8000"
+    mem_limit: 1g
+    cpus: "1.5"
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: fmp
+      POSTGRES_PASSWORD: "${DB_PASSWORD:?}"
+      POSTGRES_DB: fmp
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fmp -d fmp"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    mem_limit: 1g
+    cpus: "1.0"
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  db-backup:
+    image: prodrigestivill/postgres-backup-local:16
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_DB: fmp
+      POSTGRES_USER: fmp
+      POSTGRES_PASSWORD: "${DB_PASSWORD:?}"
+      SCHEDULE: "@daily"
+      BACKUP_KEEP_DAYS: "${BACKUP_KEEP_DAYS:-7}"
+      BACKUP_KEEP_WEEKS: "${BACKUP_KEEP_WEEKS:-4}"
+      BACKUP_KEEP_MONTHS: "${BACKUP_KEEP_MONTHS:-6}"
+      POSTGRES_EXTRA_OPTS: "-Z6"
+      HEALTHCHECK_PORT: "8080"
+    volumes:
+      - ./backups:/backups
+    mem_limit: 512m
+    cpus: "0.5"
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+volumes:
+  pgdata:
+
+networks:
+  web:
+    external: true
+  default:

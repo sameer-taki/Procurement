@@ -1,0 +1,12 @@
+fastapi==0.115.*
+uvicorn[standard]==0.30.*
+sqlmodel==0.0.21
+psycopg[binary]==3.2.*
+pydantic-settings==2.4.*
+httpx==0.27.*
+authlib==1.3.*          # Entra OIDC
+itsdangerous==2.2.*     # session signing
+pyodbc==5.1.*           # Accura ODBC
+requests==2.32.*
+requests-ntlm==1.3.*    # Business Central NTLM
+msal==1.30.*            # M365 Graph (optional helper)
