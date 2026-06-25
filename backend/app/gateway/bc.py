@@ -137,5 +137,61 @@ class BCAdapter:
     def post_purchase_order_lines(self, bc_po_no: str, lines: list[dict]) -> None:
         raise NotImplementedError  # Phase 3 live-mode line posting (TODO: confirm shape)
 
+    def post_receipt(self, receipt: dict) -> str:
+        """Post a goods receipt (GRN) to BC and return the BC GRN/receipt number.
+
+        Demo mode (BC unconfigured) returns a deterministic fake "BCGRN-<8 hex>"
+        derived from the canonical grn_no, so the same GRN always maps to the same
+        fake BC number (the outbox idempotency guard relies on stable values).
+
+        Live mode POSTs to the BC purchase-receipt OData entity. The standard
+        flow is to post against the open purchase order's lines; confirm the exact
+        receipt entity + how received quantities are posted (Qty. to Receive on the
+        PO line vs a posted-receipt header) for this BC (CLAUDE.md §7) before going
+        live. BC then owns the posted receipt and the 3-way match.
+        """
+        if self.use_fakes:
+            import hashlib
+            seed = str(receipt.get("grn_no") or receipt.get("po_id") or receipt)
+            return "BCGRN-" + hashlib.sha1(seed.encode()).hexdigest()[:8].upper()
+
+        # --- live OData POST (standard skeleton) ---
+        import requests
+        # TODO: confirm the BC purchase-receipt entity + payload shape for this
+        # tenant (post Qty. to Receive on the PO then Post, vs a receipt entity).
+        url = f"{self._company_url()}/{settings.bc_receipt_entity}"
+        body = {
+            "Document_No": receipt.get("bc_po_no") or receipt.get("po_number"),
+            "External_Document_No": receipt.get("grn_no"),
+        }
+        r = requests.post(
+            url, auth=self._auth(), json=body,
+            params={"$format": "json"},
+            verify=settings.bc_verify_tls, timeout=30,
+        )
+        r.raise_for_status()
+        data = r.json()
+        # TODO: confirm the field the posted receipt number is returned in.
+        return data.get("No") or data.get(F_NO)
+
+    def get_match_status(self, po: dict) -> str:
+        """Return BC's reported 3-way match state for a PO (PO·GRN·invoice).
+
+        BC owns the match (CLAUDE.md §2): this app never fabricates money, it only
+        reflects what BC reports. Demo mode has no separate invoice, so it returns
+        'MATCHED' once goods are received (the receipt is the demo trigger).
+
+        Live mode would poll BC for the document's match/invoice status. Returns one
+        of BC's states (e.g. 'MATCHED', 'PENDING_INVOICE', 'UNMATCHED').
+        """
+        if self.use_fakes:
+            return "MATCHED"
+
+        # --- live: poll BC for the posted-invoice / match status (TODO) ---
+        # TODO: confirm how BC exposes the 3-way-match outcome for a purchase
+        # document (posted-invoice link, a status field, or a dedicated query) and
+        # map it to one of our match states. Default to PENDING until wired.
+        return "PENDING_INVOICE"
+
     def post_sales_invoice(self, order: dict) -> str:
         raise NotImplementedError  # Phase 5

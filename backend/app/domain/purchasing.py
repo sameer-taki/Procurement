@@ -24,6 +24,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select, update
 
+from pydantic import BaseModel
+
 from .. import mailer
 from ..auth.deps import CurrentUser, get_current_user
 from ..config import settings
@@ -36,11 +38,13 @@ from ..gateway.models import (
     OrderEvent,
     POLine,
     PurchaseOrder,
+    Receipt,
     Requisition,
     RequisitionLine,
     Vendor,
     VendorPrice,
 )
+from . import stock_service
 
 log = logging.getLogger("golden.procurement.purchasing")
 
@@ -62,11 +66,25 @@ PO_REF_ENTITY_KIND = "PO"
 # Outbox / BC integration constants.
 OUTBOX_TARGET = "BC"
 OUTBOX_ACTION = "create_purchase_order"
+OUTBOX_ACTION_RECEIPT = "post_receipt"          # Phase 5 receipt posting
+# The two BC-bound actions the outbox processor dispatches.
+OUTBOX_ACTIONS = (OUTBOX_ACTION, OUTBOX_ACTION_RECEIPT)
 BC_SYSTEM = "BC"
 BC_PO_TYPE = "PURCHASE_ORDER"
 MAX_ATTEMPTS = 5
 
-# Who may run the PO workflow (create/issue). Mirrors stock's mutator gate.
+# ExternalRef (crosswalk) entity_kind + types for Phase 5 receiving + match. A GRN
+# is its own canonical entity (RECEIPT) keyed by the grn_no; the BC posted-receipt
+# number is its 'GRN' crosswalk (the idempotency anchor for receipt posting). The
+# match outcome BC reports is recorded as an INVOICE/MATCH crosswalk on the PO.
+RECEIPT_REF_ENTITY_KIND = "RECEIPT"
+BC_GRN_TYPE = "GRN"
+BC_MATCH_TYPE = "INVOICE"
+
+# PO states from which receiving is allowed.
+RECEIVABLE_STATES = {"PO_ISSUED", "ACKNOWLEDGED", "PARTIALLY_RECEIVED"}
+
+# Who may run the PO workflow (create/issue/receive). Mirrors stock's mutator gate.
 PO_EDITOR_ROLES = {"OFFICER", "ADMIN"}
 
 
@@ -133,6 +151,20 @@ def _po_lines(session: Session, po_id: str) -> list[POLine]:
     return session.exec(select(POLine).where(POLine.po_id == po_id)).all()
 
 
+def _gen_grn() -> str:
+    return f"GRN-{datetime.utcnow():%Y%m%d}-{uuid.uuid4().hex[:8]}"
+
+
+def _received_by_line(session: Session, po_id: str) -> dict[str, float]:
+    """Cumulative received quantity per po_line_id for one PO (across all GRNs)."""
+    out: dict[str, float] = {}
+    for r in session.exec(select(Receipt).where(Receipt.po_id == po_id)).all():
+        if r.po_line_id is None:
+            continue
+        out[r.po_line_id] = out.get(r.po_line_id, 0.0) + r.quantity
+    return out
+
+
 def _bc_ref(session: Session, po_id: str) -> Optional[ExternalRef]:
     """The crosswalk row proving this PO is already posted to BC, if any.
     This is the idempotency anchor: its presence means 'already posted'."""
@@ -142,6 +174,32 @@ def _bc_ref(session: Session, po_id: str) -> Optional[ExternalRef]:
             ExternalRef.entity_id == po_id,
             ExternalRef.system == BC_SYSTEM,
             ExternalRef.external_type == BC_PO_TYPE,
+        )
+    ).first()
+
+
+def _grn_ref(session: Session, grn_no: str) -> Optional[ExternalRef]:
+    """The crosswalk proving this GRN is already posted to BC, if any. This is the
+    receipt idempotency anchor: its presence means 'already posted' (never re-post).
+    Keyed by the canonical grn_no (entity_kind='RECEIPT')."""
+    return session.exec(
+        select(ExternalRef).where(
+            ExternalRef.entity_kind == RECEIPT_REF_ENTITY_KIND,
+            ExternalRef.entity_id == grn_no,
+            ExternalRef.system == BC_SYSTEM,
+            ExternalRef.external_type == BC_GRN_TYPE,
+        )
+    ).first()
+
+
+def _match_ref(session: Session, po_id: str) -> Optional[ExternalRef]:
+    """The crosswalk proving BC has reported a 3-way match for this PO, if any."""
+    return session.exec(
+        select(ExternalRef).where(
+            ExternalRef.entity_kind == PO_REF_ENTITY_KIND,
+            ExternalRef.entity_id == po_id,
+            ExternalRef.system == BC_SYSTEM,
+            ExternalRef.external_type == BC_MATCH_TYPE,
         )
     ).first()
 
@@ -216,27 +274,68 @@ def _summary(po: PurchaseOrder, vendor: Optional[Vendor],
     }
 
 
+def _receipts_out(session: Session, po_id: str,
+                  items: dict[str, Item]) -> list[dict]:
+    """Serialise the goods receipts booked against a PO for the detail payload.
+
+    The Receiving section (PurchaseOrderDetail.jsx) shows a "N GRNs booked" count
+    and a booked-receipts table keyed on these rows. One GRN is several Receipt
+    rows sharing a grn_no; we surface each Receipt line with its item SKU/name and
+    the GRN's BC crosswalk (bc_grn_no) when the receipt has posted. The 3-way match
+    is owned by BC and reflected at the PO level, so per-row match_status is left
+    None here and the UI falls back to the PO-level match badge."""
+    receipts = session.exec(
+        select(Receipt).where(Receipt.po_id == po_id).order_by(Receipt.received_at)
+    ).all()
+    out: list[dict] = []
+    grn_refs: dict[str, Optional[ExternalRef]] = {}
+    for rc in receipts:
+        item = items.get(rc.item_id) if rc.item_id else None
+        if rc.grn_no not in grn_refs:
+            grn_refs[rc.grn_no] = _grn_ref(session, rc.grn_no)
+        ref = grn_refs[rc.grn_no]
+        out.append({
+            "grn_no": rc.grn_no,
+            "bc_grn_no": ref.external_id if ref else None,
+            "sku": item.sku if item else None,
+            "name": item.name if item else None,
+            "quantity": rc.quantity,
+            "received_at": rc.received_at.isoformat(),
+        })
+    return out
+
+
 def _detail(session: Session, po: PurchaseOrder) -> dict:
     lines = _po_lines(session, po.id)
+    receipt_item_ids = {
+        r.item_id
+        for r in session.exec(select(Receipt).where(Receipt.po_id == po.id)).all()
+        if r.item_id
+    }
+    item_ids = {ln.item_id for ln in lines} | receipt_item_ids
     items = {
         it.id: it
         for it in session.exec(
-            select(Item).where(Item.id.in_({ln.item_id for ln in lines}))
+            select(Item).where(Item.id.in_(item_ids))
         ).all()
-    } if lines else {}
+    } if item_ids else {}
+    received = _received_by_line(session, po.id)
     line_out = []
     for ln in lines:
         item = items.get(ln.item_id)
         line_out.append({
+            "po_line_id": ln.id,
             "sku": item.sku if item else None,
             "name": item.name if item else None,
             "quantity": ln.quantity,
+            "received_qty": received.get(ln.id, 0.0),
             "unit_price": ln.unit_price,
             "line_total": ln.quantity * ln.unit_price,
         })
 
     vendor = session.get(Vendor, po.vendor_id)
     ref = _bc_ref(session, po.id)
+    match = _match_ref(session, po.id)
     req = session.get(Requisition, po.requisition_id) if po.requisition_id else None
 
     events = [{
@@ -264,9 +363,13 @@ def _detail(session: Session, po: PurchaseOrder) -> dict:
         "vendor": {"name": vendor.name if vendor else None,
                    "email": vendor.email if vendor else None},
         "bc_po_no": ref.external_id if ref else None,
+        "matched": match is not None,
+        "match_status": match.external_status if match else None,
+        "bc_match_no": match.external_id if match else None,
         "email_status": email_status,
         "created_at": po.created_at.isoformat(),
         "lines": line_out,
+        "receipts": _receipts_out(session, po.id, items),
         "events": events,
     }
 
@@ -449,6 +552,51 @@ def enqueue_po(session: Session, po: PurchaseOrder) -> IntegrationOutbox:
     return row
 
 
+def enqueue_receipt(session: Session, po: PurchaseOrder, grn_no: str,
+                    received_lines: list[dict]) -> IntegrationOutbox:
+    """Enqueue a BC post_receipt outbox row for one GRN.
+
+    One outbox row per GRN (entity_ref=grn_no, action='post_receipt'). The payload
+    carries grn_no + po_id (+ bc_po_no when known + the received lines) so the
+    processor can post the receipt and reflect BC's match without re-querying. The
+    partial unique index on (target, action, entity_ref) keeps it to one live row
+    per GRN even under a racing enqueue; the loser reuses the existing row."""
+    ref = _bc_ref(session, po.id)
+    payload = {
+        "grn_no": grn_no,
+        "po_id": po.id,
+        "po_number": po.number,
+        "bc_po_no": ref.external_id if ref else None,
+        "lines": received_lines,
+    }
+    row = IntegrationOutbox(
+        target=OUTBOX_TARGET,
+        action=OUTBOX_ACTION_RECEIPT,
+        entity_ref=grn_no,
+        request_json=json.dumps(payload),
+        status="PENDING",
+    )
+    session.add(row)
+    try:
+        session.commit()
+    except IntegrityError:
+        # A concurrent caller already enqueued a live row for this GRN; reuse it.
+        session.rollback()
+        existing = session.exec(
+            select(IntegrationOutbox).where(
+                IntegrationOutbox.target == OUTBOX_TARGET,
+                IntegrationOutbox.action == OUTBOX_ACTION_RECEIPT,
+                IntegrationOutbox.entity_ref == grn_no,
+                IntegrationOutbox.status != "FAILED",
+            ).order_by(IntegrationOutbox.id)
+        ).first()
+        if existing is not None:
+            return existing
+        raise
+    session.refresh(row)
+    return row
+
+
 def _notify_vendor(session: Session, po: PurchaseOrder, bc_po_no: str) -> str:
     """Guarded vendor email after a successful BC post. Never raises."""
     vendor = session.get(Vendor, po.vendor_id)
@@ -506,32 +654,26 @@ def _claim_row(session: Session, row_id: int) -> bool:
 
 
 def process_outbox(session: Session, *, max_attempts: int = MAX_ATTEMPTS) -> dict:
-    """Process PENDING BC create_purchase_order rows. Reliable + idempotent.
+    """Process PENDING BC outbox rows. Reliable + idempotent; dispatch by action.
 
-    Concurrency-safe (CLAUDE.md Phase 3 DoD: NEVER double-post). For each PENDING
-    row with attempts < max_attempts:
-      * CLAIM the row atomically (PENDING -> SENDING via a conditional UPDATE). A
-        concurrent worker that already claimed it loses the race and skips it, so
-        only one caller posts a given row to BC.
-      * IDEMPOTENCY GUARD: if an ExternalRef already exists for this PO, the PO is
-        already posted -> mark the row SENT and DO NOT call BC again.
-      * else call bc.create_purchase_order(payload); on success write the
-        ExternalRef (external_id=bc_po_no), mark SENT, set PO ACKNOWLEDGED, record
-        an OrderEvent, then notify the vendor and record the email status. A unique
-        constraint on the crosswalk makes a duplicate insert raise IntegrityError,
-        which we treat as 'already posted' (defence in depth behind the claim).
-      * on exception: attempts += 1, last_error set; the row returns to PENDING for
-        a later retry UNLESS attempts now reaches max_attempts, in which case it is
-        marked FAILED (terminal, operator-visible) with a BC_POST_FAILED event.
+    Handles both BC-bound actions (CLAUDE.md Phase 3/5 DoD: NEVER double-post):
+      * 'create_purchase_order' -> _process_po_row (Phase 3, unchanged)
+      * 'post_receipt'          -> _process_receipt_row (Phase 5)
 
-    Running this twice (sequentially or concurrently) yields exactly one BC post +
-    one ExternalRef.
+    For each PENDING row with attempts < max_attempts the loop CLAIMS it atomically
+    (PENDING -> SENDING via a conditional UPDATE) so a concurrent worker cannot also
+    process it, then dispatches to the per-action handler. Each handler enforces its
+    own idempotency guard (an ExternalRef anchor): if the work is already done it
+    marks the row SENT WITHOUT calling BC again. On failure it bumps attempts +
+    last_error and returns the row to PENDING (or terminal FAILED at max_attempts).
+
+    Running this twice yields exactly one BC post + one ExternalRef per entity.
     """
-    posted = skipped = failed = 0
+    counts = {"posted": 0, "skipped": 0, "failed": 0}
     rows = session.exec(
         select(IntegrationOutbox).where(
             IntegrationOutbox.target == OUTBOX_TARGET,
-            IntegrationOutbox.action == OUTBOX_ACTION,
+            IntegrationOutbox.action.in_(OUTBOX_ACTIONS),
             IntegrationOutbox.status == "PENDING",
         ).order_by(IntegrationOutbox.id)
     ).all()
@@ -540,7 +682,7 @@ def process_outbox(session: Session, *, max_attempts: int = MAX_ATTEMPTS) -> dic
         # Already exhausted but still PENDING (e.g. legacy data): retire it now.
         if row.attempts >= max_attempts:
             _mark_failed(session, row, "max attempts reached")
-            failed += 1
+            counts["failed"] += 1
             continue
 
         # Claim atomically; a concurrent worker that grabbed it first wins.
@@ -553,95 +695,225 @@ def process_outbox(session: Session, *, max_attempts: int = MAX_ATTEMPTS) -> dic
         except (ValueError, TypeError) as exc:
             _record_attempt_failure(session, row, None, f"bad payload: {exc}",
                                     max_attempts)
-            failed += 1
+            counts["failed"] += 1
             continue
 
-        po_id = payload.get("po_id")
-        po = session.get(PurchaseOrder, po_id) if po_id else None
-        if po is None:
-            _record_attempt_failure(session, row, po_id, f"unknown po_id {po_id}",
-                                    max_attempts)
-            failed += 1
-            continue
+        if row.action == OUTBOX_ACTION_RECEIPT:
+            result = _process_receipt_row(session, row, payload, max_attempts)
+        else:
+            result = _process_po_row(session, row, payload, max_attempts)
+        counts[result] += 1
 
-        # IDEMPOTENCY GUARD — already posted? Mark SENT, never call BC again.
-        ref = _bc_ref(session, po.id)
-        if ref is not None:
-            row.status = "SENT"
-            session.add(row)
-            session.commit()
-            skipped += 1
-            continue
+    return counts
 
-        try:
-            bc_po_no = bc.create_purchase_order(payload)
-        except Exception as exc:  # back to PENDING for a retry (or FAILED if maxed)
-            _record_attempt_failure(session, row, po.id, str(exc), max_attempts)
-            failed += 1
-            continue
 
-        # Success: write the crosswalk FIRST (the idempotency anchor), then flip
-        # the outbox + PO state in the same transaction. A unique-constraint
-        # collision here means a racing worker already posted -> treat as 'already
-        # posted' rather than double-posting.
-        session.add(ExternalRef(
-            entity_kind=PO_REF_ENTITY_KIND, entity_id=po.id,
-            system=BC_SYSTEM, external_type=BC_PO_TYPE, external_id=bc_po_no,
-            external_status="POSTED",
-        ))
+def _process_po_row(
+    session: Session, row: IntegrationOutbox, payload: dict, max_attempts: int
+) -> str:
+    """Post one create_purchase_order row to BC. Returns 'posted'|'skipped'|'failed'.
+
+    IDEMPOTENCY GUARD: if an ExternalRef already exists for this PO it is already
+    posted -> mark SENT, never call BC again. On success write the ExternalRef
+    (the anchor) first, mark SENT, set PO ACKNOWLEDGED, record an OrderEvent, then
+    notify the vendor. A duplicate crosswalk insert (unique constraint) is treated
+    as 'already posted' (defence in depth behind the claim)."""
+    po_id = payload.get("po_id")
+    po = session.get(PurchaseOrder, po_id) if po_id else None
+    if po is None:
+        _record_attempt_failure(session, row, po_id, f"unknown po_id {po_id}",
+                                max_attempts)
+        return "failed"
+
+    # IDEMPOTENCY GUARD — already posted? Mark SENT, never call BC again.
+    if _bc_ref(session, po.id) is not None:
         row.status = "SENT"
-        row.last_error = None
         session.add(row)
-        prev = po.status
-        po.status = "ACKNOWLEDGED"
-        session.add(po)
-        _record_event(
-            session,
-            entity_kind=ENTITY_KIND, entity_id=po.id,
-            from_status=prev, to_status="ACKNOWLEDGED", event_type="BC_POSTED",
-            actor="system",
-            detail={"bc_po_no": bc_po_no},
-        )
-        try:
-            session.commit()
-        except IntegrityError:
-            # Lost a crosswalk race: the PO is already posted. Reconcile this row to
-            # SENT without re-posting and move on.
-            session.rollback()
-            session.refresh(row)
-            row.status = "SENT"
-            session.add(row)
-            session.commit()
-            skipped += 1
-            continue
-
-        # Notify the vendor (guarded; never raises) and audit the email status.
-        email_status = _notify_vendor(session, po, bc_po_no)
-        _record_event(
-            session,
-            entity_kind=ENTITY_KIND, entity_id=po.id,
-            from_status="ACKNOWLEDGED", to_status="ACKNOWLEDGED",
-            event_type="VENDOR_NOTIFIED", actor="system",
-            detail={"email_status": email_status},
-        )
         session.commit()
-        posted += 1
+        return "skipped"
 
-    return {"posted": posted, "skipped": skipped, "failed": failed}
+    try:
+        bc_po_no = bc.create_purchase_order(payload)
+    except Exception as exc:  # back to PENDING for a retry (or FAILED if maxed)
+        _record_attempt_failure(session, row, po.id, str(exc), max_attempts)
+        return "failed"
+
+    # Success: write the crosswalk FIRST (the idempotency anchor), then flip the
+    # outbox + PO state in the same transaction. A unique-constraint collision here
+    # means a racing worker already posted -> treat as 'already posted'.
+    session.add(ExternalRef(
+        entity_kind=PO_REF_ENTITY_KIND, entity_id=po.id,
+        system=BC_SYSTEM, external_type=BC_PO_TYPE, external_id=bc_po_no,
+        external_status="POSTED",
+    ))
+    row.status = "SENT"
+    row.last_error = None
+    session.add(row)
+    prev = po.status
+    po.status = "ACKNOWLEDGED"
+    session.add(po)
+    _record_event(
+        session,
+        entity_kind=ENTITY_KIND, entity_id=po.id,
+        from_status=prev, to_status="ACKNOWLEDGED", event_type="BC_POSTED",
+        actor="system",
+        detail={"bc_po_no": bc_po_no},
+    )
+    try:
+        session.commit()
+    except IntegrityError:
+        # Lost a crosswalk race: the PO is already posted. Reconcile to SENT.
+        session.rollback()
+        session.refresh(row)
+        row.status = "SENT"
+        session.add(row)
+        session.commit()
+        return "skipped"
+
+    # Notify the vendor (guarded; never raises) and audit the email status.
+    email_status = _notify_vendor(session, po, bc_po_no)
+    _record_event(
+        session,
+        entity_kind=ENTITY_KIND, entity_id=po.id,
+        from_status="ACKNOWLEDGED", to_status="ACKNOWLEDGED",
+        event_type="VENDOR_NOTIFIED", actor="system",
+        detail={"email_status": email_status},
+    )
+    session.commit()
+    return "posted"
+
+
+def _process_receipt_row(
+    session: Session, row: IntegrationOutbox, payload: dict, max_attempts: int
+) -> str:
+    """Post one GRN (post_receipt) to BC, then reflect BC's 3-way match.
+    Returns 'posted'|'skipped'|'failed'.
+
+    IDEMPOTENCY GUARD: if a RECEIPT ExternalRef (external_type='GRN') already exists
+    for this grn_no the receipt is already posted -> mark SENT, never call BC again.
+    On success write that GRN crosswalk FIRST (the anchor), mark SENT, record a
+    RECEIPT_POSTED event, then ask BC for the match status. BC owns the match
+    (CLAUDE.md §2): when MATCHED we set the PO to MATCHED + write an INVOICE/MATCH
+    crosswalk on the PO — we never fabricate money.
+
+    Running this twice yields exactly one BC receipt post + one GRN ExternalRef."""
+    grn_no = payload.get("grn_no")
+    po_id = payload.get("po_id")
+    po = session.get(PurchaseOrder, po_id) if po_id else None
+    if not grn_no or po is None:
+        _record_attempt_failure(session, row, po_id,
+                                f"bad receipt payload grn={grn_no} po={po_id}",
+                                max_attempts)
+        return "failed"
+
+    # IDEMPOTENCY GUARD — this GRN already posted to BC? Mark SENT, never re-post.
+    if _grn_ref(session, grn_no) is not None:
+        row.status = "SENT"
+        session.add(row)
+        session.commit()
+        return "skipped"
+
+    try:
+        bc_grn_no = bc.post_receipt(payload)
+    except Exception as exc:  # back to PENDING for a retry (or FAILED if maxed)
+        _record_attempt_failure(session, row, po.id, str(exc), max_attempts)
+        return "failed"
+
+    # Success: write the GRN crosswalk FIRST (the idempotency anchor), mark the row
+    # SENT, and audit — all in one transaction. A duplicate crosswalk insert (unique
+    # constraint) means a racing worker already posted -> treat as 'already posted'.
+    session.add(ExternalRef(
+        entity_kind=RECEIPT_REF_ENTITY_KIND, entity_id=grn_no,
+        system=BC_SYSTEM, external_type=BC_GRN_TYPE, external_id=bc_grn_no,
+        external_status="POSTED",
+    ))
+    row.status = "SENT"
+    row.last_error = None
+    session.add(row)
+    _record_event(
+        session,
+        entity_kind=ENTITY_KIND, entity_id=po.id,
+        from_status=po.status, to_status=po.status,
+        event_type="RECEIPT_POSTED", actor="system",
+        detail={"grn_no": grn_no, "bc_grn_no": bc_grn_no},
+    )
+    try:
+        session.commit()
+    except IntegrityError:
+        # Lost a crosswalk race: the GRN is already posted. Reconcile to SENT.
+        session.rollback()
+        session.refresh(row)
+        row.status = "SENT"
+        session.add(row)
+        session.commit()
+        return "skipped"
+
+    # BC owns the 3-way match (PO·GRN·invoice). Reflect (never fabricate) it.
+    _reflect_match(session, po, payload, bc_grn_no)
+    return "posted"
+
+
+def _reflect_match(
+    session: Session, po: PurchaseOrder, payload: dict, bc_grn_no: str
+) -> None:
+    """Ask BC for the PO's 3-way-match status and reflect it. When BC reports
+    MATCHED we move the PO to MATCHED and write an INVOICE/MATCH crosswalk; we never
+    invent invoice/money figures, only mirror BC's reported outcome. Guarded so a
+    match-poll failure cannot undo the (already committed) receipt post.
+
+    A 3-way match needs the WHOLE PO·GRN·invoice, so we only poll once the PO is
+    fully received (status RECEIVED). A partial receipt leaves the PO
+    PARTIALLY_RECEIVED and unmatched until the rest arrives."""
+    session.refresh(po)
+    if po.status != "RECEIVED":
+        return
+    try:
+        match_status = bc.get_match_status(payload)
+    except Exception as exc:  # pragma: no cover - match poll is best-effort
+        log.warning("BC match status poll failed po=%s: %s", po.id, exc)
+        return
+    if match_status != "MATCHED":
+        return
+    if _match_ref(session, po.id) is not None:
+        return
+    session.add(ExternalRef(
+        entity_kind=PO_REF_ENTITY_KIND, entity_id=po.id,
+        system=BC_SYSTEM, external_type=BC_MATCH_TYPE, external_id=bc_grn_no,
+        external_status="MATCHED",
+    ))
+    prev = po.status
+    po.status = "MATCHED"
+    session.add(po)
+    _record_event(
+        session,
+        entity_kind=ENTITY_KIND, entity_id=po.id,
+        from_status=prev, to_status="MATCHED", event_type="MATCHED", actor="system",
+        detail={"match_status": match_status, "bc_grn_no": bc_grn_no},
+    )
+    try:
+        session.commit()
+    except IntegrityError:
+        # Lost a match-crosswalk race: already matched. Reconcile and move on.
+        session.rollback()
 
 
 def _mark_failed(session: Session, row: IntegrationOutbox, error: str) -> None:
-    """Move an outbox row to the terminal FAILED state and audit the PO."""
+    """Move an outbox row to the terminal FAILED state and audit the PO.
+
+    The PO to audit is resolved from the payload, NOT from entity_ref: for
+    create_purchase_order rows entity_ref IS the po_id, but for post_receipt rows
+    entity_ref is the grn_no (enqueue_receipt). Parsing request_json first gives the
+    real po_id for both actions, so the BC_POST_FAILED event lands on the correct PO
+    instead of being silently skipped for a permanently failing GRN post."""
     row.status = "FAILED"
     if error:
         row.last_error = error
     session.add(row)
-    po_id = row.entity_ref
-    if not po_id:
-        try:
-            po_id = json.loads(row.request_json).get("po_id")
-        except (ValueError, TypeError):
-            po_id = None
+    try:
+        payload = json.loads(row.request_json)
+    except (ValueError, TypeError):
+        payload = {}
+    po_id = (payload.get("po_id") if isinstance(payload, dict) else None) \
+        or row.entity_ref
     if po_id and session.get(PurchaseOrder, po_id) is not None:
         _record_event(
             session,
@@ -788,6 +1060,146 @@ def process_outbox_endpoint(
             status_code=status.HTTP_403_FORBIDDEN, detail="Requires role: ADMIN"
         )
     return process_outbox(session)
+
+
+# --------------------------------------------------------------------------- #
+# Phase 5 — Receiving (GRN capture against a PO)
+# --------------------------------------------------------------------------- #
+class ReceiveLineIn(BaseModel):
+    po_line_id: str
+    quantity: float
+    location: Optional[str] = None
+
+
+class ReceiveIn(BaseModel):
+    grn_no: Optional[str] = None
+    lines: list[ReceiveLineIn]
+
+
+def _po_status_from_receipts(session: Session, po_id: str) -> str:
+    """Recompute a PO's receiving status from received-vs-ordered across ALL lines:
+    every line fully received -> RECEIVED; some received -> PARTIALLY_RECEIVED;
+    none -> PARTIALLY_RECEIVED is not reached (we are called only after a receive)."""
+    lines = _po_lines(session, po_id)
+    received = _received_by_line(session, po_id)
+    fully = all(received.get(ln.id, 0.0) >= ln.quantity for ln in lines)
+    return "RECEIVED" if (lines and fully) else "PARTIALLY_RECEIVED"
+
+
+@router.post("/purchase-orders/{po_id}/receive")
+def receive_purchase_order(
+    po_id: str,
+    body: ReceiveIn,
+    session: Session = Depends(get_session),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Capture a goods receipt (GRN) against a PO. OFFICER/ADMIN only.
+
+    Validates the PO is receivable, each line belongs to the PO, and the cumulative
+    received quantity never exceeds the ordered quantity. Creates Receipt rows that
+    share one grn_no (one per received line), recomputes the PO status
+    (PARTIALLY_RECEIVED / RECEIVED), audits the transition, then (a) enqueues a BC
+    receipt post via the existing integration outbox and (b) re-reads stock for the
+    received items.
+
+    STOCK: the operational systems (Kiwiplan/Accura) own the on-hand increment
+    (CLAUDE.md §2 — this app DISPLAYS stock, it is never a competing source of
+    truth). So we call stock_service.refresh_item to RE-READ from source rather than
+    mutating stock_snapshots. In demo mode the source data is static, so the numbers
+    won't visibly change after a receive — that is correct, not a bug."""
+    _require_po_editor(user)
+    po = _get_po(session, po_id)
+    if po.status not in RECEIVABLE_STATES:
+        raise _bad_transition(po.status, "receive")
+    if not body.lines:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="At least one receive line is required")
+
+    lines = {ln.id: ln for ln in _po_lines(session, po_id)}
+    already = _received_by_line(session, po_id)
+
+    # Validate every line up front (atomic: no Receipt rows written on a bad batch).
+    # Accumulate within-batch quantities so two lines for the same po_line in one
+    # GRN are summed against the ordered qty.
+    batch: dict[str, float] = {}
+    for rl in body.lines:
+        po_line = lines.get(rl.po_line_id)
+        if po_line is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"PO line {rl.po_line_id} does not belong to this purchase order",
+            )
+        if rl.quantity <= 0:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                                detail="Receipt quantity must be positive")
+        batch[rl.po_line_id] = batch.get(rl.po_line_id, 0.0) + rl.quantity
+        cumulative = already.get(rl.po_line_id, 0.0) + batch[rl.po_line_id]
+        if cumulative > po_line.quantity:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Over-receipt on line {rl.po_line_id}: received {cumulative} "
+                    f"exceeds ordered {po_line.quantity}"
+                ),
+            )
+
+    grn_no = body.grn_no or _gen_grn()
+    received_payload: list[dict] = []
+    for rl in body.lines:
+        po_line = lines[rl.po_line_id]
+        session.add(Receipt(
+            po_id=po_id, po_line_id=rl.po_line_id, item_id=po_line.item_id,
+            grn_no=grn_no, quantity=rl.quantity,
+        ))
+        received_payload.append({
+            "po_line_id": rl.po_line_id, "item_id": po_line.item_id,
+            "quantity": rl.quantity, "location": rl.location,
+        })
+    session.commit()
+
+    # Recompute + audit the PO receiving transition.
+    prev = po.status
+    po.status = _po_status_from_receipts(session, po_id)
+    session.add(po)
+    _record_event(
+        session,
+        entity_kind=ENTITY_KIND, entity_id=po.id,
+        from_status=prev, to_status=po.status, event_type="RECEIVED", actor=user.email,
+        detail={"grn_no": grn_no, "lines": received_payload},
+    )
+    session.commit()
+
+    # (a) Enqueue the BC receipt post (reliable + idempotent via the outbox); drain
+    # inline when configured, exactly like PO issue.
+    enqueue_receipt(session, po, grn_no, received_payload)
+    if settings.outbox_process_on_issue:
+        process_outbox(session)
+
+    # (b) Re-read stock for each received item from its source system (never write
+    # competing stock truth). Guarded so a stock-read hiccup can't fail the receive.
+    refreshed = _refresh_received_items(session, received_payload)
+
+    session.refresh(po)
+    detail = _detail(session, po)
+    detail["grn_no"] = grn_no
+    detail["stock_refreshed"] = refreshed
+    return detail
+
+
+def _refresh_received_items(session: Session, received_lines: list[dict]) -> list[str]:
+    """Re-read stock from source for each received item (CLAUDE.md §2). Returns the
+    SKUs refreshed. Never raises: a stock-read problem must not fail the receive."""
+    skus: list[str] = []
+    for item_id in {ln["item_id"] for ln in received_lines if ln.get("item_id")}:
+        item = session.get(Item, item_id)
+        if item is None:
+            continue
+        try:
+            stock_service.refresh_item(session, item)
+            skus.append(item.sku)
+        except Exception:  # pragma: no cover - best-effort re-read
+            log.exception("stock refresh after receipt failed item=%s", item_id)
+    return skus
 
 
 @router.get("/vendors")

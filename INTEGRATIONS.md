@@ -89,6 +89,32 @@ with Data Design Services.
 
 ---
 
+## 6. Azure SQL analytics warehouse (Phase 5)
+
+| Env var | Value |
+|---------|-------|
+| `AZURE_SQL_DSN` | a full pyodbc connection string for the Azure SQL warehouse |
+
+Power BI reads the procurement KPIs (spend, on-time-delivery, stock-turn) from an
+Azure SQL warehouse. The app **computes** those figures from its own canonical data
+(receipts, PO lines, stock snapshots) and **pushes** them via `POST /api/analytics/push`
+(ADMIN). The warehouse is a read-only analytics **sink** — never canonical state; the
+gateway stays the only writer of canonical tables.
+
+**Guarded, like every other integration:** with no `AZURE_SQL_DSN` set, the writer
+(`gateway/warehouse.py`) logs and no-ops, returning `skipped:not-configured` per table
+and never raising — so the push endpoint is safe to call in demo mode. Set the DSN
+(Portainer env only; never commit it) to flip it live. `WAREHOUSE_DSN` is accepted as
+an alias of `AZURE_SQL_DSN`.
+
+**Still open (tell me and I'll wire):** the warehouse table schema — one table per
+metric (`spend` / `on_time_delivery` / `stock_turn`) vs a single tall fact table keyed
+by metric + `as_of` — and the upsert strategy (the live `_write` is a parameterized
+INSERT skeleton; a MERGE-by-`as_of` is the likely production shape). Also confirm the
+Azure SQL ODBC driver name on the Docker host.
+
+---
+
 ## Important: the cross-system crosswalk
 
 The Stock view fetches a material's Kiwiplan/Accura stock using `item.kiwiplan_ref` /

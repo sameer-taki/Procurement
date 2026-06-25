@@ -144,9 +144,16 @@ class POLine(SQLModel, table=True):
 
 
 class Receipt(SQLModel, table=True):
+    """A goods receipt line. One GRN (goods-received note) is several Receipt rows
+    that share a grn_no — one per received PO line. po_line_id/item_id make each row
+    traceable to the ordered line and item it fulfilled (Phase 5)."""
     __tablename__ = "receipts"
     id: str = Field(default_factory=uid, primary_key=True)
     po_id: str = Field(foreign_key="purchase_orders.id", index=True)
+    # The ordered line + item this receipt fulfils. Optional so legacy/manual
+    # header-only receipts still validate; set on every Phase 5 receive.
+    po_line_id: Optional[str] = Field(default=None, foreign_key="po_lines.id", index=True)
+    item_id: Optional[str] = Field(default=None, foreign_key="items.id", index=True)
     grn_no: str
     quantity: float
     received_at: datetime = Field(default_factory=datetime.utcnow)

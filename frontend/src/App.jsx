@@ -11,6 +11,7 @@ import Approvals from './pages/Approvals.jsx'
 import PurchaseOrders from './pages/PurchaseOrders.jsx'
 import PurchaseOrderDetail from './pages/PurchaseOrderDetail.jsx'
 import Planning from './pages/Planning.jsx'
+import Analytics from './pages/Analytics.jsx'
 
 export default function App() {
   return (
@@ -46,6 +47,7 @@ function Shell() {
           <NavLink to="/approvals">Approvals</NavLink>
           <NavLink to="/purchase-orders">Purchase Orders</NavLink>
           <NavLink to="/planning">Planning</NavLink>
+          <NavLink to="/analytics">Analytics</NavLink>
         </nav>
         <div className="user">
           <span className="role-pill">{user.role}</span>
@@ -64,11 +66,12 @@ function Shell() {
           <Route path="/purchase-orders" element={<PurchaseOrders />} />
           <Route path="/purchase-orders/:id" element={<PurchaseOrderDetail />} />
           <Route path="/planning" element={<Planning />} />
+          <Route path="/analytics" element={<Analytics />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </main>
       <footer className="footer muted">
-        Phase 4 · Planning · production demand explodes through BOMs into suggested requisitions
+        Phase 5 · Receiving · GRNs post to BC for the 3-way match; spend, on-time delivery & stock-turn feed the warehouse
       </footer>
     </div>
   )

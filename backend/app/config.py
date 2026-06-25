@@ -1,10 +1,13 @@
 from typing import Optional
 
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env", extra="ignore", populate_by_name=True
+    )
 
     app_env: str = "production"
     database_url: str = "postgresql+psycopg://fmp:fmp@db:5432/fmp"
@@ -48,6 +51,7 @@ class Settings(BaseSettings):
     bc_verify_tls: bool = True         # set false only for a self-signed on-prem cert
     bc_items_entity: str = "Items"     # OData entity set for the item master (confirm name)
     bc_po_entity: str = "PurchaseOrders"  # OData entity set for purchase orders (confirm name)
+    bc_receipt_entity: str = "PurchRcptHeaders"  # OData entity for posted receipts (confirm name)
 
     # Kiwiplan (KDW/SQL read, KMC inject) / Accura (ODBC read).
     # *_stock_sql is a parameterized query you supply (see INTEGRATIONS.md) returning
@@ -56,6 +60,16 @@ class Settings(BaseSettings):
     kiwiplan_stock_sql: str = ""
     accura_dsn: str = ""
     accura_stock_sql: str = ""
+
+    # Azure SQL analytics warehouse (Phase 5). The analytics figures (spend,
+    # on-time-delivery, stock-turn) are pushed here for Power BI. Guarded: with no
+    # DSN the warehouse writer logs + no-ops ('skipped:not-configured'), so the push
+    # endpoint stays usable in demo mode and only writes for real once set.
+    # AZURE_SQL_DSN is the documented env var; WAREHOUSE_DSN is accepted as an alias.
+    warehouse_dsn: str = Field(
+        default="",
+        validation_alias=AliasChoices("AZURE_SQL_DSN", "WAREHOUSE_DSN"),
+    )
 
     # M365 Graph mailer
     graph_tenant_id: str = ""
@@ -103,6 +117,12 @@ class Settings(BaseSettings):
         return bool(
             self.graph_tenant_id and self.graph_client_id and self.graph_client_secret
         )
+
+    @property
+    def warehouse_enabled(self) -> bool:
+        """True iff the Azure SQL analytics warehouse is configured (AZURE_SQL_DSN
+        set). When false the warehouse writer no-ops ('skipped:not-configured')."""
+        return bool(self.warehouse_dsn)
 
     @property
     def kiwiplan_enabled(self) -> bool:
