@@ -84,10 +84,12 @@ def health():
 # their module-level dependencies resolve cleanly.
 from .auth.routes import router as auth_router          # noqa: E402
 from .auth.routes import me_router                        # noqa: E402
+from .domain import requisitions as requisition_routes    # noqa: E402
 
 app.include_router(auth_router)
 app.include_router(me_router)
 app.include_router(stock_routes.router)
+app.include_router(requisition_routes.router)
 
 
 # Serve the built React UI (present in the image at app/static), with SPA fallback

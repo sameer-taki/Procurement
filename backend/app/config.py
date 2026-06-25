@@ -61,9 +61,13 @@ class Settings(BaseSettings):
     entra_redirect_uri: str = ""
     entra_scope: str = "openid profile email"
     # Which claim carries the user's app roles/groups, and how those map to our
-    # local role codes. Exact group/role ids are an open question (CLAUDE.md §7);
-    # default mapping matches on the role *name* case-insensitively.
+    # local role codes. Exact group/role ids are an open question (CLAUDE.md §7).
+    # entra_role_map is the recommended production path: an explicit, exact map of
+    # Entra app-role / group value (or GUID) -> local role code. When empty we fall
+    # back to exact whole-token matching of the role code in the claim value (never
+    # substring, so 'Finance-Admins' / 'Non-Admin-Users' cannot escalate to ADMIN).
     entra_role_claim: str = "roles"
+    entra_role_map: dict[str, str] = {}
     default_role: str = "VIEWER"
 
     # --- capability helpers (never raise; safe to read anywhere) ---

@@ -2,9 +2,17 @@
 
 Maps Entra app-role/group claims to local role codes
 (REQUESTER / OFFICER / APPROVER / VIEWER / ADMIN); the approval limit lives on the
-role. The exact app-role/group ids are an OPEN QUESTION (CLAUDE.md §7); the default
-mapping matches the local role *name* inside a claim value, case-insensitively, and
-falls back to settings.default_role.
+role. The exact app-role/group ids are an OPEN QUESTION (CLAUDE.md §7).
+
+Mapping is deliberately *exact*, never substring. Each claim value is resolved
+independently by:
+  1. an explicit configured map (settings.entra_role_map: claim value / GUID ->
+     role code, the recommended production path), then
+  2. exact, case-insensitive equality of the whole claim value against a canonical
+     role code ("ADMIN", "APPROVER", ...).
+We never do `code in joined_string` substring containment — that let group names
+like 'Finance-Admins', 'Administrative-Assistants' or 'Non-Admin-Users' silently
+escalate to ADMIN. Unmatched claims fall back to settings.default_role.
 """
 from typing import Optional
 
@@ -15,6 +23,29 @@ from ..config import settings
 from ..gateway.models import User
 
 ROLE_CODES = ["ADMIN", "APPROVER", "OFFICER", "REQUESTER", "VIEWER"]  # most→least privileged
+
+
+def _role_for_claim_value(value: str) -> Optional[str]:
+    """Map one claim value to a role code, exact-match only. None if nothing matches.
+
+    1. An explicit configured mapping (settings.entra_role_map) wins — keyed by the
+       raw claim value or its GUID, compared case-insensitively. This is the
+       production path for opaque group GUIDs / arbitrary group names.
+    2. Otherwise the *whole* claim value must equal a canonical role code
+       (case-insensitive). This deliberately rejects names that merely contain a
+       role code as a substring ('Finance-Admins', 'Non-Admin-Users', 'GoldenAdmin'),
+       which is the privilege-escalation hole being closed.
+    """
+    norm = str(value).strip().upper()
+    role_map = getattr(settings, "entra_role_map", None) or {}
+    for key, code in role_map.items():
+        if str(key).strip().upper() == norm:
+            mapped = str(code).strip().upper()
+            if mapped in ROLE_CODES:
+                return mapped
+    if norm in ROLE_CODES:
+        return norm
+    return None
 
 oauth = OAuth()
 _registered = False
@@ -39,13 +70,18 @@ def get_oauth() -> OAuth:
 
 
 def map_role(claims: dict) -> str:
-    """Pick the highest-privilege local role named in the configured claim."""
+    """Pick the highest-privilege local role mapped from the configured claim.
+
+    Each claim value is resolved independently via an exact (explicit-map or
+    whole-token) match — never substring containment — and the most privileged
+    matched role wins. Falls back to settings.default_role when none match.
+    """
     raw = claims.get(settings.entra_role_claim) or []
     if isinstance(raw, str):
         raw = [raw]
-    values = " ".join(str(v) for v in raw).upper()
-    for code in ROLE_CODES:                      # ADMIN first, so it wins
-        if code in values:
+    matched = {role for v in raw if (role := _role_for_claim_value(v)) is not None}
+    for code in ROLE_CODES:                          # ADMIN first, so it wins
+        if code in matched:
             return code
     return settings.default_role
 
