@@ -28,6 +28,14 @@ class Settings(BaseSettings):
     stock_refresh_seconds: int = 1800            # ~30 min
     seed_demo_on_empty: bool = True              # populate items + stock on first boot
 
+    # Integration outbox processor (retries reliable BC posting; idempotent)
+    outbox_process_enabled: bool = True
+    outbox_process_seconds: int = 60             # drain pending BC posts ~every minute
+    # Drain the outbox inline on the issue request thread for an immediate post.
+    # Posting is race-safe (per-row claim + unique crosswalk), but you can disable
+    # this so ONLY the background scheduler posts, eliminating overlap entirely.
+    outbox_process_on_issue: bool = True
+
     # Run alembic upgrade head on startup (off in tests)
     run_migrations_on_startup: bool = True
 
@@ -39,6 +47,7 @@ class Settings(BaseSettings):
     bc_auth: str = "ntlm"              # "ntlm" | "basic"
     bc_verify_tls: bool = True         # set false only for a self-signed on-prem cert
     bc_items_entity: str = "Items"     # OData entity set for the item master (confirm name)
+    bc_po_entity: str = "PurchaseOrders"  # OData entity set for purchase orders (confirm name)
 
     # Kiwiplan (KDW/SQL read, KMC inject) / Accura (ODBC read).
     # *_stock_sql is a parameterized query you supply (see INTEGRATIONS.md) returning
@@ -86,6 +95,14 @@ class Settings(BaseSettings):
     @property
     def bc_enabled(self) -> bool:
         return bool(self.bc_base_url and self.bc_username and self.bc_password)
+
+    @property
+    def graph_enabled(self) -> bool:
+        """True iff the M365 Graph mailer is fully configured (tenant+client+secret).
+        When false the vendor-notify path is skipped rather than attempted."""
+        return bool(
+            self.graph_tenant_id and self.graph_client_id and self.graph_client_secret
+        )
 
     @property
     def kiwiplan_enabled(self) -> bool:

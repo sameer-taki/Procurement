@@ -99,8 +99,43 @@ class BCAdapter:
 
     # WRITES
     def create_purchase_order(self, po: dict) -> str:
-        """Post a PO to BC; return the BC PO number."""
-        raise NotImplementedError  # Phase 3
+        """Post a PO to BC and return the BC PO number.
+
+        Demo mode (BC unconfigured) returns a deterministic fake "BCPO-<8 hex>"
+        derived from the canonical po_id, so the same PO always maps to the same
+        fake BC number (the outbox idempotency guard relies on stable values).
+
+        Live mode POSTs to the BC purchase-order OData entity. Standard BC V4
+        field names are assumed (Buy_from_Vendor_No / lines via the
+        PurchaseOrderLines navigation); confirm the exact entity + line shape +
+        document-no behaviour for your BC (see CLAUDE.md §7) before going live.
+        """
+        if self.use_fakes:
+            import hashlib
+            seed = str(po.get("po_id") or po.get("number") or po)
+            return "BCPO-" + hashlib.sha1(seed.encode()).hexdigest()[:8].upper()
+
+        # --- live OData POST (standard skeleton) ---
+        import requests
+        url = f"{self._company_url()}/{settings.bc_po_entity}"
+        body = {
+            # TODO: confirm BC purchase-order field names + how lines are posted
+            # (inline navigation vs a separate line entity) for this tenant.
+            "Buy_from_Vendor_No": po.get("vendor_bc_no") or po.get("vendor_no"),
+            "External_Document_No": po.get("number"),
+        }
+        r = requests.post(
+            url, auth=self._auth(), json=body,
+            params={"$format": "json"},
+            verify=settings.bc_verify_tls, timeout=30,
+        )
+        r.raise_for_status()
+        data = r.json()
+        # TODO: confirm the field the posted document number is returned in.
+        return data.get("No") or data.get(F_NO)
+
+    def post_purchase_order_lines(self, bc_po_no: str, lines: list[dict]) -> None:
+        raise NotImplementedError  # Phase 3 live-mode line posting (TODO: confirm shape)
 
     def post_sales_invoice(self, order: dict) -> str:
         raise NotImplementedError  # Phase 5

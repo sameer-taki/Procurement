@@ -9,6 +9,7 @@ import os
 os.environ["APP_ENV"] = "test"                       # non-prod => non-secure cookies over http
 os.environ["RUN_MIGRATIONS_ON_STARTUP"] = "false"
 os.environ["STOCK_REFRESH_ENABLED"] = "false"
+os.environ["OUTBOX_PROCESS_ENABLED"] = "false"
 os.environ["SEED_DEMO_ON_EMPTY"] = "false"
 os.environ.setdefault("DATABASE_URL", "sqlite://")
 os.environ.setdefault("SECRET_KEY", "test-secret-key-0123456789-0123456789-abcd")

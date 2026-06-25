@@ -1,16 +1,19 @@
 import React, { useCallback, useEffect, useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams } from 'react-router-dom'
 import { api } from '../api.js'
 import { useAuth } from '../auth.jsx'
 import { money, num, relativeTime } from '../format.js'
 import { availableActions, statusBadge } from '../requisitions.js'
+import { canIssuePO } from '../purchaseOrders.js'
 
 export default function RequisitionDetail() {
   const { id } = useParams()
+  const navigate = useNavigate()
   const { user, setUser } = useAuth()
   const [req, setReq] = useState(null)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState('')
+  const [createdPOs, setCreatedPOs] = useState(null)
 
   const load = useCallback(() => {
     api.get(`/api/requisitions/${id}`)
@@ -45,11 +48,36 @@ export default function RequisitionDetail() {
     act('cancel')
   }
 
+  // Convert an APPROVED requisition into vendor-grouped purchase orders. The
+  // backend is idempotent: calling it again returns the existing POs rather
+  // than duplicating. A single resulting PO jumps straight to its detail page;
+  // multiple (one per vendor) are listed for the user to open.
+  async function createPO() {
+    setBusy('create-po')
+    setError('')
+    try {
+      const pos = await api.post(`/api/requisitions/${id}/create-po`)
+      const list = Array.isArray(pos) ? pos : (pos ? [pos] : [])
+      if (list.length === 1) {
+        navigate(`/purchase-orders/${list[0].id}`)
+        return
+      }
+      setCreatedPOs(list)
+      load()
+    } catch (e) {
+      if (e.status === 401) setUser(null)
+      else setError(e.message)
+    } finally {
+      setBusy('')
+    }
+  }
+
   if (error && !req) return <div className="error">{error}</div>
   if (!req) return <div className="muted">Loading requisition…</div>
 
   const actions = availableActions(user, req.status, req.estimated_amount, req.requester)
-  const anyAction = actions.submit || actions.cancel || actions.approve || actions.reject
+  const showCreatePO = canIssuePO(user) && req.status === 'APPROVED'
+  const anyAction = actions.submit || actions.cancel || actions.approve || actions.reject || showCreatePO
 
   return (
     <div>
@@ -63,6 +91,11 @@ export default function RequisitionDetail() {
         </div>
         {anyAction && (
           <div className="form-actions">
+            {showCreatePO && (
+              <button className="btn btn-primary" disabled={!!busy} onClick={createPO}>
+                {busy === 'create-po' ? 'Creating PO…' : 'Create PO'}
+              </button>
+            )}
             {actions.submit && (
               <button className="btn btn-primary" disabled={!!busy} onClick={() => act('submit')}>
                 {busy === 'submit' ? 'Submitting…' : 'Submit for approval'}
@@ -88,6 +121,26 @@ export default function RequisitionDetail() {
       </div>
 
       {error && <div className="error">{error}</div>}
+
+      {createdPOs && createdPOs.length > 0 && (
+        <div className="card">
+          <h2>Purchase orders raised</h2>
+          <p className="muted small">
+            One purchase order per vendor (cheapest vendor chosen per material). Open each to issue
+            it and post to BC.
+          </p>
+          <ul className="suggest">
+            {createdPOs.map((po) => (
+              <li key={po.id}>
+                <Link className="suggest-item" to={`/purchase-orders/${po.id}`}>
+                  <span><strong>{po.number}</strong> · {po.vendor || 'vendor'}</span>
+                  <span className="muted small">{po.total != null ? money(po.total) : ''}</span>
+                </Link>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       <div className="meta-row">
         <Meta label="Requester" value={req.requester} />
