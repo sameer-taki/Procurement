@@ -115,6 +115,71 @@ CATALOG = [
 _BY_SKU = {row["sku"]: row for row in CATALOG}
 
 
+# --------------------------------------------------------------------------- #
+# Vendors + vendor prices (BC owns these in reality; demo until BC is wired).
+# Each vendor_price: price in FJD, moq, lead_time_days. Two vendors compete on a
+# few SKUs so vendor selection (cheapest, tie-break lead time) is exercised.
+# `bc_vendor_no` mirrors what the BC vendor master would expose.
+# --------------------------------------------------------------------------- #
+VENDORS = [
+    {"name": "Pacific Paper & Board Ltd", "email": "sales@pacificpaper.example",
+     "bc_vendor_no": "V-1001"},
+    {"name": "Fiji Industrial Supplies", "email": "sales@fijiindustrial.example",
+     "bc_vendor_no": "V-1002"},
+]
+
+# {sku: [ {vendor_name, price, moq, lead_time_days}, ... ]}
+VENDOR_PRICES = {
+    "BOARD-200K": [
+        {"vendor": "Pacific Paper & Board Ltd", "price": 1.80, "moq": 1000, "lead_time_days": 21},
+        {"vendor": "Fiji Industrial Supplies", "price": 1.88, "moq": 500, "lead_time_days": 18},
+    ],
+    "BOARD-150F": [
+        {"vendor": "Pacific Paper & Board Ltd", "price": 1.50, "moq": 1000, "lead_time_days": 21},
+    ],
+    "TESTLINER-125": [
+        {"vendor": "Pacific Paper & Board Ltd", "price": 1.30, "moq": 1000, "lead_time_days": 28},
+    ],
+    "GLUE-STARCH": [
+        {"vendor": "Fiji Industrial Supplies", "price": 1.95, "moq": 200, "lead_time_days": 10},
+    ],
+    "INK-FLEXO-CYAN": [
+        # Same price from both vendors -> tie-break on the lower lead_time_days.
+        {"vendor": "Pacific Paper & Board Ltd", "price": 13.50, "moq": 20, "lead_time_days": 30},
+        {"vendor": "Fiji Industrial Supplies", "price": 13.50, "moq": 10, "lead_time_days": 20},
+    ],
+    "WIRE-STITCH": [
+        {"vendor": "Fiji Industrial Supplies", "price": 3.50, "moq": 50, "lead_time_days": 14},
+    ],
+    "LBL-SUB-PP": [
+        {"vendor": "Fiji Industrial Supplies", "price": 0.78, "moq": 500, "lead_time_days": 35},
+    ],
+    "LBL-SUB-PAPER": [
+        {"vendor": "Fiji Industrial Supplies", "price": 0.48, "moq": 500, "lead_time_days": 28},
+    ],
+    "LBL-RIBBON-TT": [
+        {"vendor": "Fiji Industrial Supplies", "price": 8.50, "moq": 24, "lead_time_days": 21},
+    ],
+    "STRAP-PET-16": [
+        {"vendor": "Fiji Industrial Supplies", "price": 0.10, "moq": 2000, "lead_time_days": 18},
+    ],
+}
+
+
+def vendors() -> list[dict]:
+    """Vendor master as BC would expose it (one row per vendor)."""
+    return [dict(v) for v in VENDORS]
+
+
+def vendor_prices() -> list[dict]:
+    """Flat vendor-price rows: {sku, vendor, price, moq, lead_time_days}."""
+    out: list[dict] = []
+    for sku, rows in VENDOR_PRICES.items():
+        for r in rows:
+            out.append({"sku": sku, **r})
+    return out
+
+
 def list_items() -> list[dict]:
     """Item master as BC would expose it (one row per SKU)."""
     out = []

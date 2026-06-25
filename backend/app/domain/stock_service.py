@@ -11,10 +11,11 @@ from typing import Optional
 from sqlmodel import Session, delete, select
 
 from ..config import settings
+from ..gateway import fakes
 from ..gateway.accura import AccuraAdapter
 from ..gateway.bc import BCAdapter
 from ..gateway.kiwiplan import KiwiplanAdapter
-from ..gateway.models import Item, ItemType, StockSnapshot
+from ..gateway.models import Item, ItemType, StockSnapshot, Vendor, VendorPrice
 
 bc = BCAdapter()
 kiwiplan = KiwiplanAdapter()
@@ -67,6 +68,47 @@ def sync_items(session: Session) -> int:
     return len(rows)
 
 
+def seed_vendors(session: Session) -> int:
+    """Seed demo vendors + vendor_prices when the vendor table is empty.
+
+    BC owns the vendor master + prices in reality; until BC is wired we seed the
+    demo set so PO vendor-selection works out of the box. Idempotent: no-op once
+    any vendor exists. Returns the number of vendor_price rows after seeding.
+
+    Runs only in BC demo mode (live BC will supply the real masters). Called from
+    refresh_all so both startup and the test fixture get vendors for free.
+    """
+    if not bc.use_fakes:
+        return len(session.exec(select(VendorPrice)).all())
+    existing = session.exec(select(Vendor)).first()
+    if existing is not None:
+        return len(session.exec(select(VendorPrice)).all())
+
+    by_name: dict[str, Vendor] = {}
+    for v in fakes.vendors():
+        vendor = Vendor(name=v["name"], email=v.get("email"),
+                        bc_vendor_no=v.get("bc_vendor_no"))
+        session.add(vendor)
+        by_name[v["name"]] = vendor
+    session.commit()
+
+    items_by_sku = {it.sku: it for it in session.exec(select(Item)).all()}
+    count = 0
+    for row in fakes.vendor_prices():
+        item = items_by_sku.get(row["sku"])
+        vendor = by_name.get(row["vendor"])
+        if item is None or vendor is None:
+            continue
+        session.add(VendorPrice(
+            vendor_id=vendor.id, item_id=item.id,
+            price=row["price"], currency="FJD",
+            moq=row.get("moq"), lead_time_days=row.get("lead_time_days"),
+        ))
+        count += 1
+    session.commit()
+    return count
+
+
 def _rows_for(item: Item) -> list[tuple[str, list[dict]]]:
     """(system, rows) for each operational source that holds this item, skipping
     a source if its live read fails so one outage can't blank the whole view."""
@@ -104,6 +146,10 @@ def refresh_item(session: Session, item: Item) -> None:
 def refresh_all(session: Session) -> int:
     """Sync the master then refresh every item's stock. Returns items refreshed."""
     sync_items(session)
+    # Seed demo vendors + vendor_prices once the item master exists (no-op when a
+    # vendor already exists, or when BC is live). Keeps PO vendor-selection usable
+    # out of the box and makes vendors available to the test fixture.
+    seed_vendors(session)
     items = session.exec(select(Item)).all()
     for item in items:
         refresh_item(session, item)

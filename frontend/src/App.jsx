@@ -8,6 +8,8 @@ import StockDetail from './pages/StockDetail.jsx'
 import Requisitions from './pages/Requisitions.jsx'
 import RequisitionDetail from './pages/RequisitionDetail.jsx'
 import Approvals from './pages/Approvals.jsx'
+import PurchaseOrders from './pages/PurchaseOrders.jsx'
+import PurchaseOrderDetail from './pages/PurchaseOrderDetail.jsx'
 
 export default function App() {
   return (
@@ -41,6 +43,7 @@ function Shell() {
           <NavLink to="/stock">Stock</NavLink>
           <NavLink to="/requisitions">Requisitions</NavLink>
           <NavLink to="/approvals">Approvals</NavLink>
+          <NavLink to="/purchase-orders">Purchase Orders</NavLink>
         </nav>
         <div className="user">
           <span className="role-pill">{user.role}</span>
@@ -56,11 +59,13 @@ function Shell() {
           <Route path="/requisitions" element={<Requisitions />} />
           <Route path="/requisitions/:id" element={<RequisitionDetail />} />
           <Route path="/approvals" element={<Approvals />} />
+          <Route path="/purchase-orders" element={<PurchaseOrders />} />
+          <Route path="/purchase-orders/:id" element={<PurchaseOrderDetail />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </main>
       <footer className="footer muted">
-        Phase 2 · Requisitions &amp; approvals · estimated amounts use BC selling price
+        Phase 3 · Purchase orders · approved requisitions post to BC and email the vendor
       </footer>
     </div>
   )

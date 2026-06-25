@@ -32,6 +32,12 @@ def _refresh_job() -> None:
         stock_service.refresh_all(s)
 
 
+def _outbox_job() -> None:
+    from .domain import purchasing
+    with Session(engine) as s:
+        purchasing.process_outbox(s)
+
+
 async def _scheduler() -> None:
     """Periodic stock refresh (~every settings.stock_refresh_seconds)."""
     while True:
@@ -41,6 +47,17 @@ async def _scheduler() -> None:
             log.info("stock refresh complete")
         except Exception:  # pragma: no cover - keep the loop alive
             log.exception("scheduled stock refresh failed")
+
+
+async def _outbox_scheduler() -> None:
+    """Periodically drain the integration outbox (retries failed BC posts).
+    Idempotent: an already-posted PO is skipped via its ExternalRef, never reposted."""
+    while True:
+        await asyncio.sleep(settings.outbox_process_seconds)
+        try:
+            await asyncio.to_thread(_outbox_job)
+        except Exception:  # pragma: no cover - keep the loop alive
+            log.exception("scheduled outbox processing failed")
 
 
 @asynccontextmanager
@@ -56,11 +73,15 @@ async def lifespan(app: FastAPI):
             stock_service.refresh_all(s)
             log.info("seeded initial catalog + stock")
 
-    task = asyncio.create_task(_scheduler()) if settings.stock_refresh_enabled else None
+    tasks = []
+    if settings.stock_refresh_enabled:
+        tasks.append(asyncio.create_task(_scheduler()))
+    if settings.outbox_process_enabled:
+        tasks.append(asyncio.create_task(_outbox_scheduler()))
     try:
         yield
     finally:
-        if task:
+        for task in tasks:
             task.cancel()
 
 
@@ -85,11 +106,13 @@ def health():
 from .auth.routes import router as auth_router          # noqa: E402
 from .auth.routes import me_router                        # noqa: E402
 from .domain import requisitions as requisition_routes    # noqa: E402
+from .domain import purchasing as purchasing_routes        # noqa: E402
 
 app.include_router(auth_router)
 app.include_router(me_router)
 app.include_router(stock_routes.router)
 app.include_router(requisition_routes.router)
+app.include_router(purchasing_routes.router)
 
 
 # Serve the built React UI (present in the image at app/static), with SPA fallback

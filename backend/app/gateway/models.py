@@ -5,6 +5,7 @@ from datetime import date, datetime
 from enum import Enum
 from typing import Optional
 
+from sqlalchemy import UniqueConstraint
 from sqlmodel import Field, SQLModel
 
 
@@ -125,6 +126,9 @@ class PurchaseOrder(SQLModel, table=True):
     id: str = Field(default_factory=uid, primary_key=True)
     number: str = Field(index=True, unique=True)
     vendor_id: str = Field(foreign_key="vendors.id", index=True)
+    # Source requisition (Phase 3): a PO is traceable back to the approved req it
+    # was created from. Optional so receiving/manual POs (later phases) need not set it.
+    requisition_id: Optional[str] = Field(default=None, foreign_key="requisitions.id", index=True)
     status: str = "DRAFT"          # DRAFT|PO_ISSUED|ACKNOWLEDGED|PARTIALLY_RECEIVED|RECEIVED|MATCHED|CLOSED|CANCELLED
     total: Optional[float] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
@@ -162,8 +166,20 @@ class StockSnapshot(SQLModel, table=True):
 
 
 class ExternalRef(SQLModel, table=True):
-    """The crosswalk: one canonical entity -> its native id in a system."""
+    """The crosswalk: one canonical entity -> its native id in a system.
+
+    The (entity_kind, entity_id, system, external_type) tuple is UNIQUE: a single
+    canonical entity has at most one native id per system+type. This constraint is
+    the database-level idempotency anchor that makes a concurrent double-post to BC
+    impossible — two racing outbox workers cannot both INSERT this crosswalk row.
+    """
     __tablename__ = "external_refs"
+    __table_args__ = (
+        UniqueConstraint(
+            "entity_kind", "entity_id", "system", "external_type",
+            name="uq_external_refs_entity_system_type",
+        ),
+    )
     id: str = Field(default_factory=uid, primary_key=True)
     entity_kind: str               # ORDER|ORDER_LINE|REQUISITION|PO|RECEIPT
     entity_id: str
@@ -176,11 +192,20 @@ class ExternalRef(SQLModel, table=True):
 
 class IntegrationOutbox(SQLModel, table=True):
     __tablename__ = "integration_outbox"
+    # A partial unique index (created in the Alembic migration, dialect-aware) keeps
+    # at most one LIVE (status != 'FAILED') outbox row per (target, action,
+    # entity_ref) so a re-issue / racing enqueue cannot create a duplicate posting
+    # job; FAILED rows are excluded so a fresh attempt can be enqueued after a dead
+    # row. Tests build the schema via create_all (no partial-WHERE there), so the
+    # application also guards enqueue with an explicit by-entity_ref lookup.
     id: Optional[int] = Field(default=None, primary_key=True)
     target: str                    # BC|KIWIPLAN|ACCURA
     action: str
+    # First-class dedupe key (e.g. the PO id) so a re-enqueue check is a single
+    # indexed lookup rather than a scan+json-parse of every row.
+    entity_ref: Optional[str] = Field(default=None, index=True)
     request_json: str
-    status: str = "PENDING"        # PENDING|SENT|FAILED
+    status: str = "PENDING"        # PENDING|SENDING|SENT|FAILED
     attempts: int = 0
     last_error: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
