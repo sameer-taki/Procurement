@@ -39,11 +39,11 @@ function Shell() {
   const { user, logout } = useAuth()
   return (
     <div className="app">
-      <header className="topbar">
+      <aside className="sidebar">
         <div className="brand">
           <span className="logo">◆</span> Golden Procurement
         </div>
-        <nav className="nav">
+        <nav className="side-nav">
           <NavLink to="/" end>Dashboard</NavLink>
           <NavLink to="/stock">Stock</NavLink>
           <NavLink to="/requisitions">Requisitions</NavLink>
@@ -55,33 +55,37 @@ function Shell() {
           <NavLink to="/shipments">Shipping</NavLink>
           <NavLink to="/analytics">Analytics</NavLink>
         </nav>
-        <div className="user">
-          <span className="role-pill">{user.role}</span>
-          <span className="muted">{user.name || user.email}</span>
-          <button className="btn-link" onClick={logout}>Sign out</button>
-        </div>
-      </header>
-      <main className="content">
-        <Routes>
-          <Route path="/" element={<Dashboard />} />
-          <Route path="/stock" element={<Stock />} />
-          <Route path="/stock/:sku" element={<StockDetail />} />
-          <Route path="/requisitions" element={<Requisitions />} />
-          <Route path="/requisitions/:id" element={<RequisitionDetail />} />
-          <Route path="/approvals" element={<Approvals />} />
-          <Route path="/purchase-orders" element={<PurchaseOrders />} />
-          <Route path="/purchase-orders/:id" element={<PurchaseOrderDetail />} />
-          <Route path="/planning" element={<Planning />} />
-          <Route path="/paper-planning" element={<PaperPlanning />} />
-          <Route path="/forecasts" element={<Forecasts />} />
-          <Route path="/shipments" element={<Shipments />} />
-          <Route path="/analytics" element={<Analytics />} />
-          <Route path="*" element={<Navigate to="/" replace />} />
-        </Routes>
-      </main>
-      <footer className="footer muted">
-        Phase 6 · Paper planning · 3-month cover by grade & deckle; forecasts explode to KG, orders consolidate into 40 ft FCLs
-      </footer>
+      </aside>
+      <div className="main">
+        <header className="topbar">
+          <div className="user">
+            <span className="role-pill">{user.role}</span>
+            <span className="muted">{user.name || user.email}</span>
+            <button className="btn-link" onClick={logout}>Sign out</button>
+          </div>
+        </header>
+        <main className="content">
+          <Routes>
+            <Route path="/" element={<Dashboard />} />
+            <Route path="/stock" element={<Stock />} />
+            <Route path="/stock/:sku" element={<StockDetail />} />
+            <Route path="/requisitions" element={<Requisitions />} />
+            <Route path="/requisitions/:id" element={<RequisitionDetail />} />
+            <Route path="/approvals" element={<Approvals />} />
+            <Route path="/purchase-orders" element={<PurchaseOrders />} />
+            <Route path="/purchase-orders/:id" element={<PurchaseOrderDetail />} />
+            <Route path="/planning" element={<Planning />} />
+            <Route path="/paper-planning" element={<PaperPlanning />} />
+            <Route path="/forecasts" element={<Forecasts />} />
+            <Route path="/shipments" element={<Shipments />} />
+            <Route path="/analytics" element={<Analytics />} />
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </main>
+        <footer className="footer muted">
+          Phase 6 · Paper planning · 3-month cover by grade & deckle; forecasts explode to KG, orders consolidate into 40 ft FCLs
+        </footer>
+      </div>
     </div>
   )
 }
