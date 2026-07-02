@@ -44,6 +44,7 @@ from ..gateway.models import (
     Vendor,
     VendorPrice,
 )
+from . import shipments as shipment_service
 from . import stock_service
 
 log = logging.getLogger("golden.procurement.purchasing")
@@ -370,6 +371,7 @@ def _detail(session: Session, po: PurchaseOrder) -> dict:
         "created_at": po.created_at.isoformat(),
         "lines": line_out,
         "receipts": _receipts_out(session, po.id, items),
+        "shipments": shipment_service.po_shipments(session, po.id),
         "events": events,
     }
 

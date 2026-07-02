@@ -43,6 +43,11 @@ class Item(SQLModel, table=True):
     std_cost: Optional[float] = None          # rolled up from BOM
     sales_price: Optional[float] = None       # cached from BC price list
     price_synced_at: Optional[datetime] = None
+    # Paper/board raw materials are tracked by grade AND deckle (GML procurement
+    # SOP §3): grade = board type+GSM (e.g. CWT140, BX186), deckle_mm = roll width.
+    # Both come from the BC item master; None for everything that isn't roll stock.
+    grade: Optional[str] = Field(default=None, index=True)
+    deckle_mm: Optional[int] = None
     active: bool = True
 
 
@@ -107,7 +112,7 @@ class Requisition(SQLModel, table=True):
     number: str = Field(index=True, unique=True)
     requester: str
     status: str = "DRAFT"          # DRAFT|SUBMITTED|IN_APPROVAL|APPROVED|REJECTED|CLOSED|CANCELLED
-    source: str = "manual"         # manual|demand|reorder
+    source: str = "manual"         # manual|demand|reorder|coverage
     cost_center: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
@@ -170,6 +175,65 @@ class StockSnapshot(SQLModel, table=True):
     on_order: float = 0
     available: float = 0
     as_of: datetime = Field(default_factory=datetime.utcnow)
+
+
+class UsageHistory(SQLModel, table=True):
+    """Monthly paper consumption per item, imported from BC (SOP step 3).
+
+    The usage originates in Kiwiplan (paper consumed by Jobs) and is passed to BC,
+    which maintains paper inventory; we import BC's usage export so the planning
+    run can compute trailing-average movement for non-forecast items. One row per
+    (item, period): re-imports upsert, never duplicate."""
+    __tablename__ = "usage_history"
+    __table_args__ = (
+        UniqueConstraint("item_id", "period", name="uq_usage_history_item_period"),
+    )
+    id: str = Field(default_factory=uid, primary_key=True)
+    item_id: str = Field(foreign_key="items.id", index=True)
+    period: str = Field(index=True)          # "YYYY-MM" calendar month
+    quantity: float                          # consumed in the item's UOM (KG for paper)
+    source: str = "BC"
+    imported_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class Forecast(SQLModel, table=True):
+    """Rolling customer forecast, in CARTONS of a finished item (SOP step 1).
+
+    Sales/Customer Service maintain these; the planning run explodes them through
+    the BOMs to KG of paper per grade/deckle. One row per (customer, item, period):
+    a resubmitted forecast replaces the previous figure."""
+    __tablename__ = "forecasts"
+    __table_args__ = (
+        UniqueConstraint("customer", "item_id", "period",
+                         name="uq_forecasts_customer_item_period"),
+    )
+    id: str = Field(default_factory=uid, primary_key=True)
+    customer: str = Field(index=True)
+    item_id: str = Field(foreign_key="items.id", index=True)
+    period: str = Field(index=True)          # "YYYY-MM" calendar month
+    qty_cartons: float
+    updated_by: Optional[str] = None
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class Shipment(SQLModel, table=True):
+    """In-transit tracking for a PO (SOP step 8) — replaces the manual
+    Visy_Order_Details workbook. Recorded from the vendor's order confirmation and
+    updated as the vessel moves; open shipments are the in-transit volume the next
+    planning run nets off so confirmed orders are never double-ordered."""
+    __tablename__ = "shipments"
+    id: str = Field(default_factory=uid, primary_key=True)
+    po_id: str = Field(foreign_key="purchase_orders.id", index=True)
+    vessel: Optional[str] = None
+    etd: Optional[date] = None
+    eta: Optional[date] = None
+    rolls: Optional[int] = None
+    weight_kg: Optional[float] = None
+    fcl_count: Optional[int] = None
+    status: str = "CONFIRMED"      # CONFIRMED|ON_WATER|ARRIVED|RECEIVED|CANCELLED
+    notes: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
 
 
 class ExternalRef(SQLModel, table=True):

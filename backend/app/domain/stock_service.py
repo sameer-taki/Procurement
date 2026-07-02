@@ -19,9 +19,12 @@ from ..gateway.models import (
     BomHeader,
     BomLine,
     BomOwner,
+    Forecast,
     Item,
     ItemType,
+    OrderEvent,
     StockSnapshot,
+    UsageHistory,
     Vendor,
     VendorPrice,
 )
@@ -61,6 +64,15 @@ def sync_items(session: Session) -> int:
         item.is_made = r.get("is_made", False)
         item.reorder_point = r.get("reorder_point")
         item.lead_time_days = r.get("lead_time_days")
+        # Paper attributes (SOP §3): stock is planned by grade AND deckle. BC
+        # owns them, but only overwrite when the adapter actually supplies a
+        # value — live _map_item returns None until the BC field mapping is
+        # confirmed (INTEGRATIONS.md), and blanking grade on the first live sync
+        # would silently empty the entire Order Page.
+        if r.get("grade") is not None:
+            item.grade = r.get("grade")
+        if r.get("deckle_mm") is not None:
+            item.deckle_mm = r.get("deckle_mm")
         # Price comes with the master row when available; fall back to a per-item
         # lookup only if it doesn't.
         price = r.get("sales_price")
@@ -168,6 +180,105 @@ def seed_boms(session: Session) -> int:
     return count
 
 
+# Marks rows/events written by the demo seeds, so the seeds can tell their own
+# data from anything a user (or a real BC import) has touched and keep hands off.
+DEMO_SEED_ACTOR = "demo-seed"
+
+
+def seed_usage_history(session: Session) -> int:
+    """Seed demo monthly usage (SOP step 3) for an out-of-the-box Order Page.
+
+    In reality this is BC's usage export (Kiwiplan job consumption passed to BC),
+    imported via POST /api/planning/import-usage; the seed only ever runs in demo
+    mode. Because the trailing window is computed from today, seeded months age
+    out: when EVERY row is still ours (source='demo-seed') and the newest one has
+    fallen behind last month, the seed refreshes itself so a long-running demo
+    doesn't quietly lose its usage basis. The moment any row has another source
+    (a real/demo import rewrote it), we never touch the table again. Returns the
+    usage_history row count."""
+    if not bc.use_fakes:
+        return len(session.exec(select(UsageHistory)).all())
+    rows = session.exec(select(UsageHistory)).all()
+    if rows:
+        all_ours = all(r.source == DEMO_SEED_ACTOR for r in rows)
+        newest = max(r.period for r in rows)
+        last_month = fakes.trailing_periods(1)[-1]
+        if not (all_ours and newest < last_month):
+            return len(rows)
+        for r in rows:                       # stale demo window: re-seed fresh
+            session.delete(r)
+        session.commit()
+
+    items_by_sku = {it.sku: it for it in session.exec(select(Item)).all()}
+    count = 0
+    for row in fakes.usage_entries():
+        item = items_by_sku.get(row["sku"])
+        if item is None:
+            continue
+        session.add(UsageHistory(
+            item_id=item.id, period=row["period"], quantity=row["quantity"],
+            source=DEMO_SEED_ACTOR,
+        ))
+        count += 1
+    session.commit()
+    return count
+
+
+def _forecast_seed_marker(session: Session):
+    return session.exec(
+        select(OrderEvent).where(
+            OrderEvent.entity_kind == "SYSTEM",
+            OrderEvent.entity_id == "demo-forecasts",
+            OrderEvent.event_type == "DEMO_FORECASTS_SEEDED",
+        )
+    ).first()
+
+
+def seed_forecasts(session: Session) -> int:
+    """Seed the demo customer forecast (SOP step 1), exactly once per database.
+
+    Forecasts are app-owned user data (Sales/CS submit them), so the seed must
+    never resurrect demand a planner deliberately deleted: a SYSTEM OrderEvent
+    marker records that seeding has happened, and an empty table with the marker
+    present stays empty. The one exception mirrors the usage seed: while every
+    row is still untouched demo data (updated_by='demo-seed') and the whole
+    window has aged into the past, the seed refreshes itself so a long-running
+    demo keeps a live-looking forward window. Returns the forecast row count."""
+    if not bc.use_fakes:
+        return len(session.exec(select(Forecast)).all())
+    rows = session.exec(select(Forecast)).all()
+    current_month = fakes.forward_periods(1)[0]
+    if rows:
+        all_ours = all(f.updated_by == DEMO_SEED_ACTOR for f in rows)
+        newest = max(f.period for f in rows)
+        if not (all_ours and newest < current_month):
+            return len(rows)
+        for f in rows:                       # stale demo window: re-seed fresh
+            session.delete(f)
+        session.commit()
+    elif _forecast_seed_marker(session) is not None:
+        return 0                             # user deleted them; stay deleted
+
+    items_by_sku = {it.sku: it for it in session.exec(select(Item)).all()}
+    count = 0
+    for row in fakes.forecasts():
+        item = items_by_sku.get(row["item"])
+        if item is None:
+            continue
+        session.add(Forecast(
+            customer=row["customer"], item_id=item.id, period=row["period"],
+            qty_cartons=row["qty_cartons"], updated_by=DEMO_SEED_ACTOR,
+        ))
+        count += 1
+    if _forecast_seed_marker(session) is None:
+        session.add(OrderEvent(
+            entity_kind="SYSTEM", entity_id="demo-forecasts",
+            event_type="DEMO_FORECASTS_SEEDED", actor=DEMO_SEED_ACTOR,
+        ))
+    session.commit()
+    return count
+
+
 def _rows_for(item: Item) -> list[tuple[str, list[dict]]]:
     """(system, rows) for each operational source that holds this item, skipping
     a source if its live read fails so one outage can't blank the whole view."""
@@ -212,6 +323,11 @@ def refresh_all(session: Session) -> int:
     # Seed demo BOMs the same way (no-op once any BOM exists / when BC is live) so
     # the explosion service + suggested requisitions work out of the box.
     seed_boms(session)
+    # Seed demo paper usage + the demo customer forecast (no-op once any row
+    # exists / when BC is live) so the paper-planning Order Page has a usage
+    # basis and a forecast to explode out of the box.
+    seed_usage_history(session)
+    seed_forecasts(session)
     items = session.exec(select(Item)).all()
     for item in items:
         refresh_item(session, item)
@@ -269,6 +385,8 @@ def unified_view(session: Session, item: Item) -> dict:
         "name": item.name,
         "item_type": item.item_type.value if hasattr(item.item_type, "value") else item.item_type,
         "uom": item.uom,
+        "grade": item.grade,
+        "deckle_mm": item.deckle_mm,
         "reorder_point": item.reorder_point,
         "lead_time_days": item.lead_time_days,
         "is_purchased": item.is_purchased,
@@ -315,6 +433,8 @@ def search_items(session: Session, q: str = "", limit: int = 50) -> list[dict]:
             "name": item.name,
             "item_type": item.item_type.value if hasattr(item.item_type, "value") else item.item_type,
             "uom": item.uom,
+            "grade": item.grade,
+            "deckle_mm": item.deckle_mm,
             "reorder_point": item.reorder_point,
             "totals": totals,
             "systems": sorted({s.system for s in snaps}),

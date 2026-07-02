@@ -10,9 +10,12 @@ def test_search_returns_catalog(admin_client):
 
 
 def test_search_query_filters(admin_client):
+    # q matches SKU or name (the paper catalog's "Kraft Linerboard ..." items
+    # match on name without BOARD in the SKU).
     body = admin_client.get("/api/stock", params={"q": "BOARD"}).json()
     assert body["results"]
-    assert all("BOARD" in r["sku"] for r in body["results"])
+    assert all("BOARD" in r["sku"] or "board" in r["name"].lower()
+               for r in body["results"])
 
 
 def test_unified_view_aggregates_locations(admin_client):
@@ -39,7 +42,7 @@ def test_refresh_single(admin_client):
 
 def test_dashboard_counts(admin_client):
     d = admin_client.get("/api/dashboard").json()
-    assert d["counts"]["items"] == 12
+    assert d["counts"]["items"] == 19    # incl. the 6 paper grade/deckle SKUs + carton
     assert d["counts"]["below_reorder"] >= 1
     assert any(x["sku"] == "WIRE-STITCH" for x in d["low_stock"])
 

@@ -52,6 +52,7 @@ class Settings(BaseSettings):
     bc_items_entity: str = "Items"     # OData entity set for the item master (confirm name)
     bc_po_entity: str = "PurchaseOrders"  # OData entity set for purchase orders (confirm name)
     bc_receipt_entity: str = "PurchRcptHeaders"  # OData entity for posted receipts (confirm name)
+    bc_usage_entity: str = "ItemLedgerEntries"   # OData entity for the usage export (confirm name)
 
     # Kiwiplan (KDW/SQL read, KMC inject) / Accura (ODBC read).
     # *_stock_sql is a parameterized query you supply (see INTEGRATIONS.md) returning
