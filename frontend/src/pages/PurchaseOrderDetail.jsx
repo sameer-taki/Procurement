@@ -8,6 +8,10 @@ import {
   buildReceivePayload, canShowReceiveForm, hasReceiptLines, lineReceiptRows,
   matchBadge, validateReceipt,
 } from '../receiving.js'
+import {
+  buildShipmentPayload, canPlanPaper, canRecordShipment, fmtTonnes,
+  shipmentNextStatuses, shipmentStatusBadge,
+} from '../paperPlanning.js'
 import { renderDetail } from '../events.js'
 
 // How a PO's email-notify status (returned by the backend) reads in the UI.
@@ -145,6 +149,8 @@ export default function PurchaseOrderDetail() {
       </section>
 
       <ReceivingSection po={po} rows={rcptRows} id={id} user={user} setUser={setUser} reload={load} />
+
+      <ShipmentsSection po={po} id={id} user={user} setUser={setUser} reload={load} />
 
       <section className="card">
         <h2>History</h2>
@@ -328,6 +334,172 @@ function ReceivingSection({ po, rows, id, user, setUser, reload }) {
         Business Central owns the 3-way match (PO · GRN · invoice). This app only reflects the match
         state BC reports; it never fabricates money.
       </p>
+    </section>
+  )
+}
+
+// Shipments (paper-planning SOP): the vessels carrying this PO's paper. Booked
+// shipments count as "in transit" on the Order Page coverage maths. The record
+// form only shows for OFFICER/ADMIN while the PO can carry a shipment — the
+// backend still enforces RBAC (403) and state (409 for DRAFT/CANCELLED/CLOSED).
+const EMPTY_SHIPMENT = { vessel: '', etd: '', eta: '', rolls: '', weight_kg: '', fcl_count: '', notes: '' }
+
+function ShipmentsSection({ po, id, user, setUser, reload }) {
+  const [form, setForm] = useState(EMPTY_SHIPMENT)
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState('')
+
+  const shipments = po.shipments || []
+  const showForm = canRecordShipment(user, po.status)
+  const canUpdate = canPlanPaper(user)
+
+  function set(key, value) {
+    setForm((prev) => ({ ...prev, [key]: value }))
+  }
+
+  async function record(e) {
+    e.preventDefault()
+    setError('')
+    setBusy('record')
+    try {
+      await api.post(`/api/purchase-orders/${id}/shipments`, buildShipmentPayload(form))
+      setForm(EMPTY_SHIPMENT)
+      reload()
+    } catch (e2) {
+      if (e2.status === 401) setUser(null)
+      else setError(e2.message) // 409 bad PO state / 403 RBAC surface here
+    } finally {
+      setBusy('')
+    }
+  }
+
+  async function advance(shipmentId, status) {
+    if (!status) return
+    setError('')
+    setBusy(`advance-${shipmentId}`)
+    try {
+      await api.patch(`/api/shipments/${shipmentId}`, { status })
+      reload()
+    } catch (e2) {
+      if (e2.status === 401) setUser(null)
+      else setError(e2.message)
+    } finally {
+      setBusy('')
+    }
+  }
+
+  return (
+    <section className="card">
+      <h2>
+        Shipments{' '}
+        <span className="muted small">
+          {shipments.length} booked
+        </span>
+      </h2>
+
+      {shipments.length === 0 ? (
+        <p className="muted">No shipments recorded against this purchase order yet.</p>
+      ) : (
+        <table className="table">
+          <thead>
+            <tr>
+              <th>Vessel</th><th>ETD</th><th>ETA</th>
+              <th className="r">Rolls</th><th className="r">Weight</th><th className="r">FCLs</th>
+              <th>Status</th><th>Notes</th><th>Updated</th>
+              {canUpdate && <th></th>}
+            </tr>
+          </thead>
+          <tbody>
+            {shipments.map((s) => {
+              const next = shipmentNextStatuses(s.status)
+              return (
+                <tr key={s.id}>
+                  <td>{s.vessel || <span className="muted small">tba</span>}</td>
+                  <td className="nowrap">{s.etd || '—'}</td>
+                  <td className="nowrap">{s.eta || '—'}</td>
+                  <td className="r">{s.rolls != null ? num(s.rolls) : '—'}</td>
+                  <td className="r">{fmtTonnes(s.weight_kg)}</td>
+                  <td className="r">{s.fcl_count != null ? num(s.fcl_count) : '—'}</td>
+                  <td>
+                    <span className={`badge ${shipmentStatusBadge(s.status)}`}>
+                      {s.status.replace(/_/g, ' ')}
+                    </span>
+                  </td>
+                  <td className="muted small">{s.notes || '—'}</td>
+                  <td className="muted small">{relativeTime(s.updated_at)}</td>
+                  {canUpdate && (
+                    <td>
+                      {next.length > 0 && (
+                        <select
+                          className="select"
+                          value=""
+                          disabled={!!busy}
+                          onChange={(ev) => advance(s.id, ev.target.value)}
+                        >
+                          <option value="">
+                            {busy === `advance-${s.id}` ? 'Updating…' : 'Mark…'}
+                          </option>
+                          {next.map((st) => (
+                            <option key={st} value={st}>{st.replace(/_/g, ' ')}</option>
+                          ))}
+                        </select>
+                      )}
+                    </td>
+                  )}
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      )}
+
+      {showForm && (
+        <form onSubmit={record} style={{ marginTop: 12 }}>
+          <div className="form-row">
+            <label className="field">
+              <span className="field-label">Vessel <span className="muted">(optional)</span></span>
+              <input className="input" value={form.vessel} onChange={(e) => set('vessel', e.target.value)} placeholder="e.g. Kota Ratu" />
+            </label>
+            <label className="field">
+              <span className="field-label">ETD</span>
+              <input className="input" type="date" value={form.etd} onChange={(e) => set('etd', e.target.value)} />
+            </label>
+            <label className="field">
+              <span className="field-label">ETA</span>
+              <input className="input" type="date" value={form.eta} onChange={(e) => set('eta', e.target.value)} />
+            </label>
+            <label className="field">
+              <span className="field-label">Rolls</span>
+              <input className="input qty" type="number" min="0" step="1" value={form.rolls} onChange={(e) => set('rolls', e.target.value)} />
+            </label>
+            <label className="field">
+              <span className="field-label">Weight (kg)</span>
+              <input className="input qty" type="number" min="0" step="any" value={form.weight_kg} onChange={(e) => set('weight_kg', e.target.value)} />
+            </label>
+            <label className="field">
+              <span className="field-label">FCLs</span>
+              <input className="input qty" type="number" min="0" step="1" value={form.fcl_count} onChange={(e) => set('fcl_count', e.target.value)} />
+            </label>
+            <label className="field">
+              <span className="field-label">Notes <span className="muted">(optional)</span></span>
+              <input className="input" value={form.notes} onChange={(e) => set('notes', e.target.value)} />
+            </label>
+          </div>
+
+          {error && <div className="error">{error}</div>}
+
+          <div className="form-actions">
+            <button className="btn btn-primary" type="submit" disabled={!!busy}>
+              {busy === 'record' ? 'Recording…' : 'Record shipment'}
+            </button>
+          </div>
+          <p className="muted small">
+            New shipments start as CONFIRMED; advance them as the vendor reports the vessel on the
+            water, arrived, or received.
+          </p>
+        </form>
+      )}
+      {!showForm && error && <div className="error">{error}</div>}
     </section>
   )
 }

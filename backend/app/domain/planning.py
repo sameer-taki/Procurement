@@ -37,6 +37,9 @@ from ..db import get_session
 from ..gateway import planning as engine
 from ..gateway.bc import BCAdapter
 from ..gateway.bom import explode
+# Re-exported here because the planning window is service-level API surface
+# (tests and callers reach them via this module).
+from ..gateway.planning import forward_periods, trailing_periods  # noqa: F401
 from ..gateway.models import (
     Forecast,
     Item,
@@ -77,35 +80,6 @@ def _require_planner(user: CurrentUser) -> None:
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Requires role: {', '.join(sorted(PLANNER_ROLES))}",
         )
-
-
-# --------------------------------------------------------------------------- #
-# Period helpers ("YYYY-MM" calendar months)
-# --------------------------------------------------------------------------- #
-def forward_periods(n: int, today: Optional[date] = None) -> list[str]:
-    """The current month + the next n-1, oldest first."""
-    today = today or date.today()
-    year, month = today.year, today.month
-    out: list[str] = []
-    for _ in range(n):
-        out.append(f"{year:04d}-{month:02d}")
-        month += 1
-        if month == 13:
-            year, month = year + 1, 1
-    return out
-
-
-def trailing_periods(n: int, today: Optional[date] = None) -> list[str]:
-    """The n calendar months before the current one, oldest first."""
-    today = today or date.today()
-    year, month = today.year, today.month
-    out: list[str] = []
-    for _ in range(n):
-        month -= 1
-        if month == 0:
-            year, month = year - 1, 12
-        out.append(f"{year:04d}-{month:02d}")
-    return list(reversed(out))
 
 
 # --------------------------------------------------------------------------- #
@@ -157,8 +131,10 @@ def forecast_kg_by_item(session: Session, periods: list[str]) -> tuple[dict, lis
     """Explode the window's carton forecasts through the BOMs -> KG per paper item.
 
     Returns ({paper_item_id: kg over the window}, [skipped forecast SKUs]) where a
-    forecast is skipped when its finished item has no BOM to explode (surfaced so
-    the planner can fix the master data — SOP §9 data integrity)."""
+    forecast is skipped when its finished item has no BOM to explode — or a broken
+    (cyclic) one, which mirrored data could produce. Both are surfaced in
+    skipped_forecasts so the planner can fix the master data (SOP §9 data
+    integrity) while the rest of the Order Page still renders."""
     forecasts = session.exec(
         select(Forecast).where(Forecast.period.in_(periods))
     ).all()
@@ -175,7 +151,13 @@ def forecast_kg_by_item(session: Session, periods: list[str]) -> tuple[dict, lis
             parent = session.get(Item, parent_id)
             skipped.append(parent.sku if parent else parent_id)
             continue
-        for mat, kg in explode(parent_id, cartons, bom_of).items():
+        try:
+            exploded = explode(parent_id, cartons, bom_of)
+        except ValueError:              # BOM cycle in mirrored data
+            parent = session.get(Item, parent_id)
+            skipped.append(parent.sku if parent else parent_id)
+            continue
+        for mat, kg in exploded.items():
             if mat in paper_ids:
                 kg_by_item[mat] = kg_by_item.get(mat, 0.0) + kg
     return kg_by_item, sorted(skipped)

@@ -16,11 +16,42 @@ decision rule (SOP §8):
   always UP; grades/deckles are combined per vendor to fill whole containers.
 """
 from dataclasses import dataclass, field
+from datetime import date
 from math import ceil
 from typing import Dict, List, Optional
 
 COVER_MONTHS = 3
 KG_PER_FCL = 25_000.0          # 25 tonnes = 1 x 40ft FCL (SOP §3/§8)
+
+
+# --------------------------------------------------------------------------- #
+# Period helpers ("YYYY-MM" calendar months) — shared by the planning service
+# and the demo data so windows are always computed one way.
+# --------------------------------------------------------------------------- #
+def forward_periods(n: int, today: Optional[date] = None) -> List[str]:
+    """The current month + the next n-1, oldest first."""
+    today = today or date.today()
+    year, month = today.year, today.month
+    out: List[str] = []
+    for _ in range(n):
+        out.append(f"{year:04d}-{month:02d}")
+        month += 1
+        if month == 13:
+            year, month = year + 1, 1
+    return out
+
+
+def trailing_periods(n: int, today: Optional[date] = None) -> List[str]:
+    """The n calendar months before the current one, oldest first."""
+    today = today or date.today()
+    year, month = today.year, today.month
+    out: List[str] = []
+    for _ in range(n):
+        month -= 1
+        if month == 0:
+            year, month = year - 1, 12
+        out.append(f"{year:04d}-{month:02d}")
+    return list(reversed(out))
 
 
 def trailing_average(monthly_qty: List[float]) -> float:

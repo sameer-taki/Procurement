@@ -3,7 +3,8 @@
 Figures are computed from canonical data; tests seed receipts via the public
 receive endpoint (BOARD-200K @ Pacific, price 1.80, qty 1000) so the spend/OTD
 numbers are deterministic. stock_turn is computed over the demo catalog snapshots
-seeded by conftest (sum allocated / sum on_hand = 34580 / 89795 = 0.3851).
+seeded by conftest (sum allocated / sum on_hand = 65280 / 278995 = 0.234, incl.
+the paper roll-stock grades).
 """
 from datetime import date, timedelta
 
@@ -19,8 +20,8 @@ LIMITS = {
     "REQUESTER": 0.0, "VIEWER": 0.0,
 }
 
-# Demo stock-turn over the seeded catalog (allocated 34580 / on_hand 89795).
-EXPECTED_STOCK_TURN = round(34580 / 89795, 4)
+# Demo stock-turn over the seeded catalog (allocated 65280 / on_hand 278995).
+EXPECTED_STOCK_TURN = round(65280 / 278995, 4)
 
 
 def as_role(role_code, email=None):

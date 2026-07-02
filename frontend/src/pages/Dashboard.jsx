@@ -7,12 +7,17 @@ import { num, relativeTime } from '../format.js'
 export default function Dashboard() {
   const { setUser } = useAuth()
   const [data, setData] = useState(null)
+  const [paper, setPaper] = useState(null) // order-page summary; optional
   const [error, setError] = useState('')
 
   useEffect(() => {
     api.get('/api/dashboard')
       .then(setData)
       .catch((e) => (e.status === 401 ? setUser(null) : setError(e.message)))
+    // Paper coverage tile — degrade gracefully (no tile) if the call fails.
+    api.get('/api/planning/order-page')
+      .then(setPaper)
+      .catch(() => {})
   }, [setUser])
 
   if (error) return <div className="error">{error}</div>
@@ -26,11 +31,18 @@ export default function Dashboard() {
         <span className="muted">stock as of {relativeTime(data.as_of)}</span>
       </div>
 
-      <div className="tiles">
+      <div className={`tiles ${paper ? 'tiles-5' : ''}`}>
         <Tile label="Items" value={num(c.items)} />
         <Tile label="Materials" value={num(c.materials)} />
         <Tile label="Stock locations" value={num(c.tracked_locations)} />
         <Tile label="Below reorder" value={num(c.below_reorder)} warn={c.below_reorder > 0} />
+        {paper && (
+          <Tile
+            label={`Paper below ${paper.cover_months ?? 3}-mo cover`}
+            value={num(paper.below_cover)}
+            warn={paper.below_cover > 0}
+          />
+        )}
       </div>
 
       <div className="grid-2">

@@ -16,6 +16,8 @@ so the Order Page has something to suggest.
 from datetime import date
 from typing import Optional
 
+from .planning import forward_periods, trailing_periods
+
 # Each entry: the canonical item plus the live stock rows that the operational
 # systems would report. `system` on a stock row is KIWIPLAN or ACCURA.
 CATALOG = [
@@ -249,27 +251,33 @@ VENDOR_PRICES = {
     "STRAP-PET-16": [
         {"vendor": "Fiji Industrial Supplies", "price": 0.10, "moq": 2000, "lead_time_days": 18},
     ],
-    # Import paper: moq = 25,000 KG (one 40ft FCL). Coated/white-top grades come
-    # from Visy, kraft/fluting from Changle Numat; HP140 is quoted by both so the
-    # cheapest-vendor selection is exercised on a paper grade.
+    # Import paper. Coated/white-top grades come from Visy, kraft/fluting from
+    # Changle Numat; HP140 is quoted by both so the cheapest-vendor selection is
+    # exercised on a paper grade.
+    #
+    # moq is deliberately None: the mills' 25-tonne / 40ft-FCL minimum is an
+    # ORDER-level container constraint (grades/deckles are combined to fill each
+    # container — SOP §8), enforced by the planning engine's per-vendor
+    # consolidation. A per-LINE moq here would make Phase 3 PO creation bump each
+    # grade to 25t (max(qty, moq)) and silently break that consolidation.
     "CWT140-1400": [
-        {"vendor": "Visy Board", "price": 1.82, "moq": 25000, "lead_time_days": 45},
+        {"vendor": "Visy Board", "price": 1.82, "moq": None, "lead_time_days": 45},
     ],
     "CWT140-1950": [
-        {"vendor": "Visy Board", "price": 1.82, "moq": 25000, "lead_time_days": 45},
+        {"vendor": "Visy Board", "price": 1.82, "moq": None, "lead_time_days": 45},
     ],
     "HP140-1490": [
-        {"vendor": "Visy Board", "price": 1.70, "moq": 25000, "lead_time_days": 45},
-        {"vendor": "Changle Numat (CSC)", "price": 1.64, "moq": 25000, "lead_time_days": 60},
+        {"vendor": "Visy Board", "price": 1.70, "moq": None, "lead_time_days": 45},
+        {"vendor": "Changle Numat (CSC)", "price": 1.64, "moq": None, "lead_time_days": 60},
     ],
     "RF135-1000": [
-        {"vendor": "Changle Numat (CSC)", "price": 1.36, "moq": 25000, "lead_time_days": 60},
+        {"vendor": "Changle Numat (CSC)", "price": 1.36, "moq": None, "lead_time_days": 60},
     ],
     "BX186-1400": [
-        {"vendor": "Changle Numat (CSC)", "price": 1.52, "moq": 25000, "lead_time_days": 60},
+        {"vendor": "Changle Numat (CSC)", "price": 1.52, "moq": None, "lead_time_days": 60},
     ],
     "BX200-1950": [
-        {"vendor": "Changle Numat (CSC)", "price": 1.58, "moq": 25000, "lead_time_days": 60},
+        {"vendor": "Changle Numat (CSC)", "price": 1.58, "moq": None, "lead_time_days": 60},
     ],
 }
 
@@ -340,23 +348,10 @@ USAGE_KG_BY_SKU = {
 }
 
 
-def _trailing_periods(n: int, today: Optional[date] = None) -> list[str]:
-    """The n calendar months before the current one, oldest first ('YYYY-MM')."""
-    today = today or date.today()
-    year, month = today.year, today.month
-    out: list[str] = []
-    for _ in range(n):
-        month -= 1
-        if month == 0:
-            year, month = year - 1, 12
-        out.append(f"{year:04d}-{month:02d}")
-    return list(reversed(out))
-
-
 def usage_entries(today: Optional[date] = None) -> list[dict]:
     """Monthly usage rows as the BC export would supply them:
     {sku, period, quantity} for the trailing six months per paper SKU."""
-    periods = _trailing_periods(6, today)
+    periods = trailing_periods(6, today)
     out: list[dict] = []
     for sku, quantities in USAGE_KG_BY_SKU.items():
         for period, qty in zip(periods, quantities):
@@ -364,23 +359,10 @@ def usage_entries(today: Optional[date] = None) -> list[dict]:
     return out
 
 
-def _forward_periods(n: int, today: Optional[date] = None) -> list[str]:
-    """The current month + the next n-1, oldest first ('YYYY-MM')."""
-    today = today or date.today()
-    year, month = today.year, today.month
-    out: list[str] = []
-    for _ in range(n):
-        out.append(f"{year:04d}-{month:02d}")
-        month += 1
-        if month == 13:
-            year, month = year + 1, 1
-    return out
-
-
 def forecasts(today: Optional[date] = None) -> list[dict]:
     """Demo customer forecast (SOP step 1): cartons per finished item per month
     for the coming 3 months, as Sales/Customer Service would submit it."""
-    p = _forward_periods(3, today)
+    p = forward_periods(3, today)
     return [
         {"customer": "Fiji Water", "item": "CTN-FIJIWATER-1L", "period": p[0], "qty_cartons": 42000},
         {"customer": "Fiji Water", "item": "CTN-FIJIWATER-1L", "period": p[1], "qty_cartons": 45000},

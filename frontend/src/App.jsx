@@ -11,6 +11,9 @@ import Approvals from './pages/Approvals.jsx'
 import PurchaseOrders from './pages/PurchaseOrders.jsx'
 import PurchaseOrderDetail from './pages/PurchaseOrderDetail.jsx'
 import Planning from './pages/Planning.jsx'
+import PaperPlanning from './pages/PaperPlanning.jsx'
+import Forecasts from './pages/Forecasts.jsx'
+import Shipments from './pages/Shipments.jsx'
 import Analytics from './pages/Analytics.jsx'
 
 export default function App() {
@@ -47,6 +50,9 @@ function Shell() {
           <NavLink to="/approvals">Approvals</NavLink>
           <NavLink to="/purchase-orders">Purchase Orders</NavLink>
           <NavLink to="/planning">Planning</NavLink>
+          <NavLink to="/paper-planning">Order Page</NavLink>
+          <NavLink to="/forecasts">Forecasts</NavLink>
+          <NavLink to="/shipments">Shipping</NavLink>
           <NavLink to="/analytics">Analytics</NavLink>
         </nav>
         <div className="user">
@@ -66,6 +72,9 @@ function Shell() {
           <Route path="/purchase-orders" element={<PurchaseOrders />} />
           <Route path="/purchase-orders/:id" element={<PurchaseOrderDetail />} />
           <Route path="/planning" element={<Planning />} />
+          <Route path="/paper-planning" element={<PaperPlanning />} />
+          <Route path="/forecasts" element={<Forecasts />} />
+          <Route path="/shipments" element={<Shipments />} />
           <Route path="/analytics" element={<Analytics />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
