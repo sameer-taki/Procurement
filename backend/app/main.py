@@ -109,6 +109,9 @@ from .domain import requisitions as requisition_routes    # noqa: E402
 from .domain import purchasing as purchasing_routes        # noqa: E402
 from .domain import bom_service as bom_routes               # noqa: E402
 from .domain import analytics as analytics_routes           # noqa: E402
+from .domain import planning as planning_routes             # noqa: E402
+from .domain import forecasts as forecast_routes            # noqa: E402
+from .domain import shipments as shipment_routes            # noqa: E402
 
 app.include_router(auth_router)
 app.include_router(me_router)
@@ -117,6 +120,9 @@ app.include_router(requisition_routes.router)
 app.include_router(purchasing_routes.router)
 app.include_router(bom_routes.router)
 app.include_router(analytics_routes.router)
+app.include_router(planning_routes.router)
+app.include_router(forecast_routes.router)
+app.include_router(shipment_routes.router)
 
 
 # Serve the built React UI (present in the image at app/static), with SPA fallback

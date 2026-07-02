@@ -7,7 +7,13 @@ are fixed (not random) so tests and screenshots are deterministic.
 
 Item master (sku/name/type/refs/price) is owned by BC.
 Operational stock lives in Kiwiplan (corrugated + plant stores) and Accura (labels).
+
+Paper roll stock (grade + deckle) follows the GML procurement SOP: imported in
+40ft FCLs (25t) from overseas mills, tracked by grade AND deckle, planned to a
+rolling 3-month cover. The demo figures deliberately put some grades below cover
+so the Order Page has something to suggest.
 """
+from datetime import date
 from typing import Optional
 
 # Each entry: the canonical item plus the live stock rows that the operational
@@ -94,6 +100,81 @@ CATALOG = [
             {"system": "KIWIPLAN", "location": "Suva Plant Store", "on_hand": 18000, "allocated": 2000, "on_order": 0},
         ],
     },
+    # ------------------------------------------------------------------- #
+    # Paper roll stock by grade + deckle (SOP §3). SKU = <grade>-<deckle>,
+    # mirroring how the BC item master keys one item per grade/deckle. All are
+    # imported FCL paper: uom KG, long lead times, no reorder_point (the 3-month
+    # cover rule replaces min/max for roll stock).
+    # ------------------------------------------------------------------- #
+    {
+        "sku": "CWT140-1400", "name": "Coated White Top 140gsm 1400mm",
+        "item_type": "MATERIAL", "uom": "KG", "bc_item_no": "BC-4001",
+        "is_purchased": True, "is_made": False, "reorder_point": None,
+        "lead_time_days": 45, "sales_price": 1.92,
+        "grade": "CWT140", "deckle_mm": 1400,
+        "stock": [
+            {"system": "KIWIPLAN", "location": "Suva Roll Store", "on_hand": 30000, "allocated": 6000, "on_order": 0},
+        ],
+    },
+    {
+        "sku": "CWT140-1950", "name": "Coated White Top 140gsm 1950mm",
+        "item_type": "MATERIAL", "uom": "KG", "bc_item_no": "BC-4002",
+        "is_purchased": True, "is_made": False, "reorder_point": None,
+        "lead_time_days": 45, "sales_price": 1.92,
+        "grade": "CWT140", "deckle_mm": 1950,
+        "stock": [
+            {"system": "KIWIPLAN", "location": "Suva Roll Store", "on_hand": 30000, "allocated": 2000, "on_order": 0},
+        ],
+    },
+    {
+        "sku": "HP140-1490", "name": "Kraft Top Liner 140gsm 1490mm",
+        "item_type": "MATERIAL", "uom": "KG", "bc_item_no": "BC-4003",
+        "is_purchased": True, "is_made": False, "reorder_point": None,
+        "lead_time_days": 45, "sales_price": 1.78,
+        "grade": "HP140", "deckle_mm": 1490,
+        "stock": [
+            {"system": "KIWIPLAN", "location": "Suva Roll Store", "on_hand": 40000, "allocated": 8000, "on_order": 0},
+        ],
+    },
+    {
+        "sku": "RF135-1000", "name": "Recycled Fluting 135gsm 1000mm",
+        "item_type": "MATERIAL", "uom": "KG", "bc_item_no": "BC-4004",
+        "is_purchased": True, "is_made": False, "reorder_point": None,
+        "lead_time_days": 60, "sales_price": 1.45,
+        "grade": "RF135", "deckle_mm": 1000,
+        "stock": [
+            {"system": "KIWIPLAN", "location": "Suva Roll Store", "on_hand": 20000, "allocated": 3000, "on_order": 0},
+        ],
+    },
+    {
+        "sku": "BX186-1400", "name": "Kraft Linerboard 186gsm 1400mm",
+        "item_type": "MATERIAL", "uom": "KG", "bc_item_no": "BC-4005",
+        "is_purchased": True, "is_made": False, "reorder_point": None,
+        "lead_time_days": 60, "sales_price": 1.62,
+        "grade": "BX186", "deckle_mm": 1400,
+        "stock": [
+            {"system": "KIWIPLAN", "location": "Suva Roll Store", "on_hand": 60000, "allocated": 5000, "on_order": 0},
+        ],
+    },
+    {
+        "sku": "BX200-1950", "name": "Kraft Linerboard 200gsm 1950mm",
+        "item_type": "MATERIAL", "uom": "KG", "bc_item_no": "BC-4006",
+        "is_purchased": True, "is_made": False, "reorder_point": None,
+        "lead_time_days": 60, "sales_price": 1.68,
+        "grade": "BX200", "deckle_mm": 1950,
+        "stock": [
+            {"system": "KIWIPLAN", "location": "Suva Roll Store", "on_hand": 4000, "allocated": 1500, "on_order": 0},
+        ],
+    },
+    {
+        "sku": "CTN-FIJIWATER-1L", "name": "Fiji Water 1L Shipper Carton",
+        "item_type": "FINISHED", "uom": "EA", "bc_item_no": "BC-9003",
+        "is_purchased": False, "is_made": True, "reorder_point": None,
+        "lead_time_days": 7, "sales_price": 1.85,
+        "stock": [
+            {"system": "KIWIPLAN", "location": "Finished Goods", "on_hand": 5200, "allocated": 5200, "on_order": 0},
+        ],
+    },
     {
         "sku": "BOX-RSC-A", "name": "RSC Box 400x300x300", "item_type": "FINISHED",
         "uom": "EA", "bc_item_no": "BC-9001", "is_purchased": False, "is_made": True,
@@ -126,6 +207,11 @@ VENDORS = [
      "bc_vendor_no": "V-1001"},
     {"name": "Fiji Industrial Supplies", "email": "sales@fijiindustrial.example",
      "bc_vendor_no": "V-1002"},
+    # Overseas paper mills (SOP §4): FCL import paper. MOQ = one 40ft FCL (25t).
+    {"name": "Visy Board", "email": "orders@visy.example",
+     "bc_vendor_no": "V-2001"},
+    {"name": "Changle Numat (CSC)", "email": "sales@changlenumat.example",
+     "bc_vendor_no": "V-2002"},
 ]
 
 # {sku: [ {vendor_name, price, moq, lead_time_days}, ... ]}
@@ -163,6 +249,28 @@ VENDOR_PRICES = {
     "STRAP-PET-16": [
         {"vendor": "Fiji Industrial Supplies", "price": 0.10, "moq": 2000, "lead_time_days": 18},
     ],
+    # Import paper: moq = 25,000 KG (one 40ft FCL). Coated/white-top grades come
+    # from Visy, kraft/fluting from Changle Numat; HP140 is quoted by both so the
+    # cheapest-vendor selection is exercised on a paper grade.
+    "CWT140-1400": [
+        {"vendor": "Visy Board", "price": 1.82, "moq": 25000, "lead_time_days": 45},
+    ],
+    "CWT140-1950": [
+        {"vendor": "Visy Board", "price": 1.82, "moq": 25000, "lead_time_days": 45},
+    ],
+    "HP140-1490": [
+        {"vendor": "Visy Board", "price": 1.70, "moq": 25000, "lead_time_days": 45},
+        {"vendor": "Changle Numat (CSC)", "price": 1.64, "moq": 25000, "lead_time_days": 60},
+    ],
+    "RF135-1000": [
+        {"vendor": "Changle Numat (CSC)", "price": 1.36, "moq": 25000, "lead_time_days": 60},
+    ],
+    "BX186-1400": [
+        {"vendor": "Changle Numat (CSC)", "price": 1.52, "moq": 25000, "lead_time_days": 60},
+    ],
+    "BX200-1950": [
+        {"vendor": "Changle Numat (CSC)", "price": 1.58, "moq": 25000, "lead_time_days": 60},
+    ],
 }
 
 
@@ -199,7 +307,85 @@ BOMS = {
             {"component": "LBL-RIBBON-TT", "qty_per": 0.001, "scrap_pct": 0.0},
         ],
     },
+    # The SOP's demand->paper bridge (steps 1-2): the board-grade spec of the
+    # carton, as KG of each grade/deckle per carton (blank size x GSM, with the
+    # trim/corr-out factors folded into scrap_pct). Exploding a carton forecast
+    # through this bill yields the KG-per-grade requirement the Order Page nets.
+    "CTN-FIJIWATER-1L": {
+        "owner": "APP",
+        "yield_qty": 1.0,
+        "lines": [
+            {"component": "CWT140-1400", "qty_per": 0.42, "scrap_pct": 0.04},
+            {"component": "RF135-1000", "qty_per": 0.35, "scrap_pct": 0.05},
+            {"component": "BX186-1400", "qty_per": 0.38, "scrap_pct": 0.04},
+            {"component": "GLUE-STARCH", "qty_per": 0.03, "scrap_pct": 0.0},
+        ],
+    },
 }
+
+
+# --------------------------------------------------------------------------- #
+# Paper usage history (SOP step 3): monthly consumption per grade/deckle as BC
+# would export it (fed by Kiwiplan job usage). Six trailing months per SKU,
+# oldest first; the labels are computed relative to today at call time so the
+# demo Order Page always has a live-looking window. Quantities are KG.
+# --------------------------------------------------------------------------- #
+USAGE_KG_BY_SKU = {
+    "CWT140-1400": [16500, 17800, 18600, 17200, 18900, 18000],
+    "CWT140-1950": [7600, 8200, 8500, 7900, 8100, 7700],
+    "HP140-1490": [21000, 22400, 23100, 21800, 22600, 22100],
+    "RF135-1000": [11400, 12100, 12600, 11900, 12300, 11700],
+    "BX186-1400": [14200, 15100, 15600, 14800, 15300, 14000],
+    "BX200-1950": [4600, 5100, 5300, 4900, 5200, 4900],
+}
+
+
+def _trailing_periods(n: int, today: Optional[date] = None) -> list[str]:
+    """The n calendar months before the current one, oldest first ('YYYY-MM')."""
+    today = today or date.today()
+    year, month = today.year, today.month
+    out: list[str] = []
+    for _ in range(n):
+        month -= 1
+        if month == 0:
+            year, month = year - 1, 12
+        out.append(f"{year:04d}-{month:02d}")
+    return list(reversed(out))
+
+
+def usage_entries(today: Optional[date] = None) -> list[dict]:
+    """Monthly usage rows as the BC export would supply them:
+    {sku, period, quantity} for the trailing six months per paper SKU."""
+    periods = _trailing_periods(6, today)
+    out: list[dict] = []
+    for sku, quantities in USAGE_KG_BY_SKU.items():
+        for period, qty in zip(periods, quantities):
+            out.append({"sku": sku, "period": period, "quantity": float(qty)})
+    return out
+
+
+def _forward_periods(n: int, today: Optional[date] = None) -> list[str]:
+    """The current month + the next n-1, oldest first ('YYYY-MM')."""
+    today = today or date.today()
+    year, month = today.year, today.month
+    out: list[str] = []
+    for _ in range(n):
+        out.append(f"{year:04d}-{month:02d}")
+        month += 1
+        if month == 13:
+            year, month = year + 1, 1
+    return out
+
+
+def forecasts(today: Optional[date] = None) -> list[dict]:
+    """Demo customer forecast (SOP step 1): cartons per finished item per month
+    for the coming 3 months, as Sales/Customer Service would submit it."""
+    p = _forward_periods(3, today)
+    return [
+        {"customer": "Fiji Water", "item": "CTN-FIJIWATER-1L", "period": p[0], "qty_cartons": 42000},
+        {"customer": "Fiji Water", "item": "CTN-FIJIWATER-1L", "period": p[1], "qty_cartons": 45000},
+        {"customer": "Fiji Water", "item": "CTN-FIJIWATER-1L", "period": p[2], "qty_cartons": 40000},
+    ]
 
 
 def boms() -> list[dict]:
@@ -244,6 +430,9 @@ def list_items() -> list[dict]:
             "kiwiplan_ref": row["sku"] if "KIWIPLAN" in systems else None,
             "accura_ref": row["sku"] if "ACCURA" in systems else None,
             "sales_price": row["sales_price"],
+            # Paper attributes (grade + deckle); None for non-roll-stock items.
+            "grade": row.get("grade"),
+            "deckle_mm": row.get("deckle_mm"),
         })
     return out
 

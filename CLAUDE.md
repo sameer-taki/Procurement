@@ -136,6 +136,19 @@ Work one phase at a time; open a PR per phase; keep CI green. Each phase has a D
 - Feed spend / on-time-delivery / stock-turn data to the Azure SQL warehouse for Power BI.
 - **DoD:** receive against a PO, see it matched in BC, and the figures land in the warehouse.
 
+### Phase 6 — Paper planning (the procurement manager's SOP: 3-month cover by grade/deckle)
+- Item master carries `grade` + `deckle_mm`; paper roll stock = anything with a grade.
+- Forecasts (cartons per customer/finished item/month) exploded through BOMs → KG per grade;
+  non-forecast grades fall back to the trailing average of `usage_history` (imported from BC's
+  usage export — Kiwiplan job consumption passed back to BC).
+- Coverage engine (`gateway/planning.py`): order = 3×monthly usage + allocated − on-hand −
+  in-transit, consolidated per vendor into whole 25-tonne blocks (1 × 40ft FCL). In-transit is
+  the app's own open-PO volume — snapshots' `on_order` is *not* added (no double count).
+- The Order Page emits ONE DRAFT requisition (source=`coverage`) into the Phase 2 lifecycle.
+- Shipments (vessel/ETD/ETA/rolls/weight/FCLs) tracked per PO — replaces the Visy workbook.
+- **DoD:** the Order Page reproduces the SOP's decision rule; a below-cover grade becomes an
+  audited suggested requisition; shipments feed `next_eta`; CI green.
+
 ## 7. Before you start — confirm with the user (don't guess)
 
 - **Kiwiplan**: which inbound channel (KMC / Transmission Links) and which requirement/stock views

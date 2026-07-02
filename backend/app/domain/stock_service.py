@@ -19,9 +19,11 @@ from ..gateway.models import (
     BomHeader,
     BomLine,
     BomOwner,
+    Forecast,
     Item,
     ItemType,
     StockSnapshot,
+    UsageHistory,
     Vendor,
     VendorPrice,
 )
@@ -61,6 +63,9 @@ def sync_items(session: Session) -> int:
         item.is_made = r.get("is_made", False)
         item.reorder_point = r.get("reorder_point")
         item.lead_time_days = r.get("lead_time_days")
+        # Paper attributes (SOP §3): stock is planned by grade AND deckle.
+        item.grade = r.get("grade")
+        item.deckle_mm = r.get("deckle_mm")
         # Price comes with the master row when available; fall back to a per-item
         # lookup only if it doesn't.
         price = r.get("sales_price")
@@ -168,6 +173,59 @@ def seed_boms(session: Session) -> int:
     return count
 
 
+def seed_usage_history(session: Session) -> int:
+    """Seed demo monthly usage (SOP step 3) when usage_history is empty.
+
+    In reality this is BC's usage export (Kiwiplan job consumption passed to BC),
+    imported via POST /api/planning/import-usage; until BC is wired we seed the
+    demo trailing months so the Order Page has a movement basis out of the box.
+    Idempotent: no-op once any usage row exists, or when BC is live. Returns the
+    usage_history row count after seeding."""
+    if not bc.use_fakes:
+        return len(session.exec(select(UsageHistory)).all())
+    if session.exec(select(UsageHistory)).first() is not None:
+        return len(session.exec(select(UsageHistory)).all())
+
+    items_by_sku = {it.sku: it for it in session.exec(select(Item)).all()}
+    count = 0
+    for row in fakes.usage_entries():
+        item = items_by_sku.get(row["sku"])
+        if item is None:
+            continue
+        session.add(UsageHistory(
+            item_id=item.id, period=row["period"], quantity=row["quantity"],
+        ))
+        count += 1
+    session.commit()
+    return count
+
+
+def seed_forecasts(session: Session) -> int:
+    """Seed the demo customer forecast (SOP step 1) when forecasts is empty.
+
+    Forecasts are app-owned user data (Sales/CS submit them), so this seeds only
+    in demo mode for an out-of-the-box Order Page; idempotent like the other
+    seeds. Returns the forecast row count after seeding."""
+    if not bc.use_fakes:
+        return len(session.exec(select(Forecast)).all())
+    if session.exec(select(Forecast)).first() is not None:
+        return len(session.exec(select(Forecast)).all())
+
+    items_by_sku = {it.sku: it for it in session.exec(select(Item)).all()}
+    count = 0
+    for row in fakes.forecasts():
+        item = items_by_sku.get(row["item"])
+        if item is None:
+            continue
+        session.add(Forecast(
+            customer=row["customer"], item_id=item.id, period=row["period"],
+            qty_cartons=row["qty_cartons"], updated_by="demo-seed",
+        ))
+        count += 1
+    session.commit()
+    return count
+
+
 def _rows_for(item: Item) -> list[tuple[str, list[dict]]]:
     """(system, rows) for each operational source that holds this item, skipping
     a source if its live read fails so one outage can't blank the whole view."""
@@ -212,6 +270,11 @@ def refresh_all(session: Session) -> int:
     # Seed demo BOMs the same way (no-op once any BOM exists / when BC is live) so
     # the explosion service + suggested requisitions work out of the box.
     seed_boms(session)
+    # Seed demo paper usage + the demo customer forecast (no-op once any row
+    # exists / when BC is live) so the paper-planning Order Page has a usage
+    # basis and a forecast to explode out of the box.
+    seed_usage_history(session)
+    seed_forecasts(session)
     items = session.exec(select(Item)).all()
     for item in items:
         refresh_item(session, item)
@@ -269,6 +332,8 @@ def unified_view(session: Session, item: Item) -> dict:
         "name": item.name,
         "item_type": item.item_type.value if hasattr(item.item_type, "value") else item.item_type,
         "uom": item.uom,
+        "grade": item.grade,
+        "deckle_mm": item.deckle_mm,
         "reorder_point": item.reorder_point,
         "lead_time_days": item.lead_time_days,
         "is_purchased": item.is_purchased,
@@ -315,6 +380,8 @@ def search_items(session: Session, q: str = "", limit: int = 50) -> list[dict]:
             "name": item.name,
             "item_type": item.item_type.value if hasattr(item.item_type, "value") else item.item_type,
             "uom": item.uom,
+            "grade": item.grade,
+            "deckle_mm": item.deckle_mm,
             "reorder_point": item.reorder_point,
             "totals": totals,
             "systems": sorted({s.system for s in snaps}),

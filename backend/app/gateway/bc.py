@@ -69,6 +69,10 @@ class BCAdapter:
             "kiwiplan_ref": None,         # TODO: cross-system crosswalk
             "accura_ref": None,
             "sales_price": x.get(F_PRICE),
+            # TODO: confirm which BC item-master fields carry the paper grade +
+            # deckle (item category / attributes vs a naming convention on No).
+            "grade": None,
+            "deckle_mm": None,
         }
 
     # READS
@@ -93,6 +97,50 @@ class BCAdapter:
             return self._get(url, {"$select": F_PRICE}).get(F_PRICE)
         except Exception:
             return None
+
+    def get_usage_entries(self) -> list[dict]:
+        """Monthly consumption per item — the BC usage export the planning run
+        imports (SOP step 3). The usage originates in Kiwiplan (paper consumed by
+        Jobs) and is passed to BC; BC's item ledger is the export we read.
+
+        Returns [{sku, period 'YYYY-MM', quantity}] with quantity in the item's
+        base UOM (KG for paper). Demo data until BC is wired.
+
+        Live mode reads the item-ledger OData entity (settings.bc_usage_entity)
+        filtered to consumption entries and aggregates client-side by item +
+        posting month. Standard BC V4 field names are assumed (Item_No /
+        Posting_Date / Quantity, consumption negative); confirm the entity name +
+        which Entry_Type values represent Kiwiplan-fed usage for this tenant
+        (CLAUDE.md §7) before going live.
+        """
+        if self.use_fakes:
+            return fakes.usage_entries()
+
+        url = f"{self._company_url()}/{settings.bc_usage_entity}"
+        by_item_month: dict[tuple, float] = {}
+        params = {
+            # TODO: confirm the Entry_Type filter value(s) for this tenant.
+            "$filter": "Entry_Type eq 'Consumption'",
+            "$select": "Item_No,Posting_Date,Quantity",
+        }
+        while url:
+            data = self._get(url, params)
+            params = None          # nextLink already carries the query
+            for x in data.get("value", []):
+                sku = x.get("Item_No")
+                posted = str(x.get("Posting_Date") or "")
+                if not sku or len(posted) < 7:
+                    continue
+                period = posted[:7]
+                # Consumption posts negative quantities in the item ledger.
+                qty = abs(float(x.get("Quantity") or 0))
+                key = (sku, period)
+                by_item_month[key] = by_item_month.get(key, 0.0) + qty
+            url = data.get("@odata.nextLink")
+        return [
+            {"sku": sku, "period": period, "quantity": qty}
+            for (sku, period), qty in sorted(by_item_month.items())
+        ]
 
     def get_vendor(self, vendor_no: str) -> Optional[dict]:
         raise NotImplementedError  # Phase 3

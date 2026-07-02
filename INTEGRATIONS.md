@@ -53,6 +53,27 @@ OData `@odata.nextLink` pagination; price comes from `Unit_Price`.
 categories, `reorder_point`/`lead_time`, and — important — the **crosswalk** from a BC
 item to its Kiwiplan/Accura material id (see note below).
 
+### Paper planning: the usage export + grade/deckle
+
+The Order Page (paper planning per the procurement SOP) needs two more reads:
+
+| Env var | Value |
+|---------|-------|
+| `BC_USAGE_ENTITY` | usage-export entity set (default `ItemLedgerEntries`) |
+
+* **Usage (SOP step 3):** `BCAdapter.get_usage_entries` reads the item ledger
+  filtered to consumption (`Entry_Type eq 'Consumption'` — the postings Kiwiplan
+  feeds back) and aggregates client-side to KG per item per month, upserted into
+  `usage_history` via `POST /api/planning/import-usage`. **Confirm:** the entity
+  name, the `Entry_Type` values that represent Kiwiplan job usage, and the field
+  names `Item_No` / `Posting_Date` / `Quantity`.
+* **Grade + deckle:** stock is planned by grade AND deckle (roll width). The
+  adapter maps both to `items.grade` / `items.deckle_mm`, currently `None` in live
+  mode. **Confirm:** where the BC item master carries them (item attributes, a
+  category, or the item-number convention) so `_map_item` can be finished. Demo
+  data keys one item per grade+deckle (`CWT140-1400`), matching the SOP's
+  "stock is tracked by grade AND deckle".
+
 ---
 
 ## 3. Kiwiplan stock  (on-prem; validated on deploy)
