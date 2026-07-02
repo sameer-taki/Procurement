@@ -211,6 +211,10 @@ def test_receipt_enqueues_and_posts_grn_to_bc(client, engine):
             ExternalRef.external_type == "GRN")).all()
         assert len(refs) == 1
         assert refs[0].external_id.startswith("BCGRN-")
+        # Live BC posting maps received lines onto the BC order by item No, so
+        # the outbox payload must carry sku/bc_item_no per line.
+        payload = json.loads(rows[0].request_json)
+        assert all(ln["sku"] and ln["bc_item_no"] for ln in payload["lines"])
 
 
 # --------------------------------------------------------------------------- #
