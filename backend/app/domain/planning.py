@@ -67,8 +67,16 @@ PLANNER_ROLES = {"OFFICER", "ADMIN"}
 
 REQ_ENTITY_KIND = "REQUISITION"
 
-# PO states whose remaining (unreceived) quantity counts as in-transit.
-OPEN_PO_STATES = {"PO_ISSUED", "ACKNOWLEDGED", "PARTIALLY_RECEIVED"}
+# PO states whose remaining (unreceived) quantity counts as in-transit. DRAFT is
+# included deliberately: between create-po (requisition CLOSED) and issue, the
+# volume exists only on the DRAFT PO — dropping it there would let the next
+# planning run double-order it (SOP §9 in-transit accuracy). A dead DRAFT leaves
+# the pipeline via CANCELLED.
+OPEN_PO_STATES = {"DRAFT", "PO_ISSUED", "ACKNOWLEDGED", "PARTIALLY_RECEIVED"}
+
+# Requisition states in which a coverage requisition is still in flight; a second
+# planning run must not stack another full-tonnage order on top of one of these.
+OPEN_REQ_STATES = {"DRAFT", "SUBMITTED", "IN_APPROVAL", "APPROVED"}
 
 # How many trailing months of movement back the non-forecast fallback (SOP step 5).
 HISTORY_MONTHS = 3
@@ -89,32 +97,48 @@ def import_usage(session: Session) -> dict:
     """Import BC's usage export into usage_history. Upserts by (item, period) so a
     re-import refreshes rather than duplicates; rows for SKUs we don't carry are
     counted + skipped (the export can cover more of the ledger than the app).
+
+    Check-then-write is raced by a concurrent import (two officers, or the ADMIN
+    endpoint vs a scheduled run): the loser's INSERT hits
+    uq_usage_history_item_period. One retry re-reads and lands as UPDATEs —
+    same figures either way, since both imports carry the same BC export.
     """
     rows = bc.get_usage_entries()
-    items_by_sku = {it.sku: it for it in session.exec(select(Item)).all()}
     now = datetime.utcnow()
-    imported = 0
-    skipped = 0
-    for r in rows:
-        item = items_by_sku.get(r.get("sku"))
-        period = r.get("period")
-        if item is None or not period:
-            skipped += 1
+    last_error: Optional[IntegrityError] = None
+    for _ in range(2):
+        items_by_sku = {it.sku: it for it in session.exec(select(Item)).all()}
+        imported = 0
+        skipped = 0
+        for r in rows:
+            item = items_by_sku.get(r.get("sku"))
+            period = r.get("period")
+            if item is None or not period:
+                skipped += 1
+                continue
+            existing = session.exec(
+                select(UsageHistory).where(
+                    UsageHistory.item_id == item.id, UsageHistory.period == period
+                )
+            ).first()
+            if existing is None:
+                existing = UsageHistory(item_id=item.id, period=period, quantity=0.0)
+            existing.quantity = float(r.get("quantity") or 0)
+            existing.source = r.get("source", "BC")
+            existing.imported_at = now
+            session.add(existing)
+            imported += 1
+        try:
+            session.commit()
+        except IntegrityError as exc:   # lost the upsert race; retry as UPDATEs
+            session.rollback()
+            last_error = exc
             continue
-        existing = session.exec(
-            select(UsageHistory).where(
-                UsageHistory.item_id == item.id, UsageHistory.period == period
-            )
-        ).first()
-        if existing is None:
-            existing = UsageHistory(item_id=item.id, period=period, quantity=0.0)
-        existing.quantity = float(r.get("quantity") or 0)
-        existing.source = r.get("source", "BC")
-        existing.imported_at = now
-        session.add(existing)
-        imported += 1
-    session.commit()
-    return {"imported": imported, "skipped": skipped, "as_of": now.isoformat()}
+        return {"imported": imported, "skipped": skipped, "as_of": now.isoformat()}
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail="A concurrent usage import is in progress; retry shortly",
+    ) from last_error
 
 
 # --------------------------------------------------------------------------- #
@@ -127,51 +151,77 @@ def _paper_items(session: Session) -> list[Item]:
     ).all()
 
 
-def forecast_kg_by_item(session: Session, periods: list[str]) -> tuple[dict, list]:
-    """Explode the window's carton forecasts through the BOMs -> KG per paper item.
+def forecast_kg_by_item(
+    session: Session, periods: list[str]
+) -> tuple[dict, dict, list]:
+    """Explode the window's carton forecasts through the BOMs, per period.
 
-    Returns ({paper_item_id: kg over the window}, [skipped forecast SKUs]) where a
-    forecast is skipped when its finished item has no BOM to explode — or a broken
-    (cyclic) one, which mirrored data could produce. Both are surfaced in
+    Returns ({paper_item_id: kg over the window}, {paper_item_id: covered-period
+    count}, [skipped forecast SKUs]). Exploding period-by-period lets the caller
+    average over the months a forecast actually COVERS instead of a fixed /3 —
+    with forecasts entered one month at a time, a fixed divisor would read the
+    not-yet-entered months as zero demand and silently under-plan. An explicit
+    zero-carton forecast still covers its month (a real 'no demand' statement).
+
+    A forecast is skipped when its finished item has no BOM to explode — or a
+    broken (cyclic) one, which mirrored data could produce. Both are surfaced in
     skipped_forecasts so the planner can fix the master data (SOP §9 data
     integrity) while the rest of the Order Page still renders."""
     forecasts = session.exec(
         select(Forecast).where(Forecast.period.in_(periods))
     ).all()
-    cartons_by_parent: dict[str, float] = {}
+    # {period: {parent_item_id: cartons}}
+    by_period: dict[str, dict[str, float]] = {}
     for f in forecasts:
-        cartons_by_parent[f.item_id] = cartons_by_parent.get(f.item_id, 0.0) + f.qty_cartons
+        parents = by_period.setdefault(f.period, {})
+        parents[f.item_id] = parents.get(f.item_id, 0.0) + f.qty_cartons
 
     bom_of = make_bom_of(session)
     kg_by_item: dict[str, float] = {}
-    skipped: list[str] = []
+    periods_by_item: dict[str, set] = {}
+    skipped: set = set()
     paper_ids = {it.id for it in _paper_items(session)}
-    for parent_id, cartons in cartons_by_parent.items():
-        if bom_of(parent_id) is None:
-            parent = session.get(Item, parent_id)
-            skipped.append(parent.sku if parent else parent_id)
-            continue
-        try:
-            exploded = explode(parent_id, cartons, bom_of)
-        except ValueError:              # BOM cycle in mirrored data
-            parent = session.get(Item, parent_id)
-            skipped.append(parent.sku if parent else parent_id)
-            continue
-        for mat, kg in exploded.items():
-            if mat in paper_ids:
-                kg_by_item[mat] = kg_by_item.get(mat, 0.0) + kg
-    return kg_by_item, sorted(skipped)
+    for period, cartons_by_parent in by_period.items():
+        for parent_id, cartons in cartons_by_parent.items():
+            if bom_of(parent_id) is None:
+                parent = session.get(Item, parent_id)
+                skipped.add(parent.sku if parent else parent_id)
+                continue
+            try:
+                exploded = explode(parent_id, cartons, bom_of)
+            except ValueError:          # BOM cycle in mirrored data
+                parent = session.get(Item, parent_id)
+                skipped.add(parent.sku if parent else parent_id)
+                continue
+            for mat, kg in exploded.items():
+                if mat in paper_ids:
+                    kg_by_item[mat] = kg_by_item.get(mat, 0.0) + kg
+                    periods_by_item.setdefault(mat, set()).add(period)
+    counts = {item_id: len(p) for item_id, p in periods_by_item.items()}
+    return kg_by_item, counts, sorted(skipped)
 
 
 def _usage_history_by_item(session: Session, periods: list[str]) -> dict[str, list[float]]:
-    """{item_id: [monthly quantities present in the trailing window]}"""
+    """{item_id: [one quantity per window month, oldest first]} for every item
+    with any usage history at all.
+
+    Window months with no row count as ZERO movement, not as absent: the BC
+    usage export only emits rows for months with consumption postings, so a
+    quiet month (plant down, grade not run) would otherwise vanish from the
+    average and inflate monthly usage — over-ordering by whole containers.
+    Items with no usage_history anywhere stay out of the result (no basis at
+    all, so the caller falls through to basis NONE rather than a fake zero)."""
+    tracked = set(session.exec(select(UsageHistory.item_id).distinct()).all())
     rows = session.exec(
         select(UsageHistory).where(UsageHistory.period.in_(periods))
     ).all()
-    out: dict[str, list[float]] = {}
-    for r in sorted(rows, key=lambda r: r.period):
-        out.setdefault(r.item_id, []).append(r.quantity)
-    return out
+    by_item_period: dict[str, dict[str, float]] = {}
+    for r in rows:
+        by_item_period.setdefault(r.item_id, {})[r.period] = r.quantity
+    return {
+        item_id: [by_item_period.get(item_id, {}).get(p, 0.0) for p in periods]
+        for item_id in tracked
+    }
 
 
 def _open_po_qty_by_item(session: Session) -> dict[str, float]:
@@ -241,7 +291,7 @@ def order_page(session: Session, today: Optional[date] = None) -> dict:
 
     window = forward_periods(engine.COVER_MONTHS, today)
     history_window = trailing_periods(HISTORY_MONTHS, today)
-    forecast_kg, skipped_forecasts = forecast_kg_by_item(session, window)
+    forecast_kg, forecast_periods, skipped_forecasts = forecast_kg_by_item(session, window)
     history = _usage_history_by_item(session, history_window)
     in_transit = _open_po_qty_by_item(session)
     next_eta = _next_eta_by_item(session)
@@ -254,15 +304,11 @@ def order_page(session: Session, today: Optional[date] = None) -> dict:
     }
     for it in items:
         st = stock.get(it.id, {"on_hand": 0.0, "allocated": 0.0, "as_of": None})
-        if it.id in forecast_kg:
-            basis = "FORECAST"
-            monthly = forecast_kg[it.id] / engine.COVER_MONTHS
-        elif history.get(it.id):
-            basis = "HISTORY"
-            monthly = engine.trailing_average(history[it.id])
-        else:
-            basis = "NONE"
-            monthly = 0.0
+        history_avg = engine.trailing_average(history.get(it.id, []))
+        covered = forecast_periods.get(it.id, 0)
+        monthly, basis = engine.usage_basis(
+            forecast_kg.get(it.id, 0.0), covered, history_avg
+        )
 
         transit = in_transit.get(it.id, 0.0)
         months = engine.months_of_stock(st["on_hand"], transit, monthly)
@@ -285,6 +331,13 @@ def order_page(session: Session, today: Optional[date] = None) -> dict:
             "uom": it.uom,
             "basis": basis,
             "monthly_usage": monthly,
+            # Both candidate figures + coverage so the planner can see WHY a
+            # basis won (e.g. a partial or below-movement forecast).
+            "monthly_forecast": (
+                forecast_kg.get(it.id, 0.0) / covered if covered else None
+            ),
+            "monthly_history": history_avg if it.id in history else None,
+            "forecast_periods": covered,
             "usage_3mo": monthly * engine.COVER_MONTHS,
             "on_hand": st["on_hand"],
             "allocated": st["allocated"],
@@ -315,6 +368,7 @@ def order_page(session: Session, today: Optional[date] = None) -> dict:
         })
 
     rows.sort(key=lambda r: (r["grade"] or "", r["deckle_mm"] or 0))
+    open_req = _open_coverage_req(session)
     return {
         "cover_months": engine.COVER_MONTHS,
         "kg_per_fcl": engine.KG_PER_FCL,
@@ -327,7 +381,23 @@ def order_page(session: Session, today: Optional[date] = None) -> dict:
             if r["months_of_stock"] is not None
             and r["months_of_stock"] < engine.COVER_MONTHS
         ),
+        # An in-flight coverage requisition blocks a second suggest-orders run
+        # (the duplicate-order guard); surfaced so the UI can link to it.
+        "open_coverage_requisition": (
+            {"id": open_req.id, "number": open_req.number, "status": open_req.status}
+            if open_req else None
+        ),
     }
+
+
+def _open_coverage_req(session: Session) -> Optional[Requisition]:
+    """The oldest still-in-flight coverage requisition, if any."""
+    return session.exec(
+        select(Requisition).where(
+            Requisition.source == "coverage",
+            Requisition.status.in_(OPEN_REQ_STATES),
+        ).order_by(Requisition.created_at)
+    ).first()
 
 
 # --------------------------------------------------------------------------- #
@@ -338,7 +408,22 @@ def suggest_orders(session: Session, user: CurrentUser,
     """Turn the current plan's container-consolidated quantities into ONE DRAFT
     requisition (source='coverage'), one line per grade/deckle. Reuses the Phase 2
     number scheme + audit so it is indistinguishable downstream. No requirement ->
-    create nothing."""
+    create nothing.
+
+    Duplicate-order guard (SOP §9): while a previous coverage requisition is
+    still in flight (DRAFT -> APPROVED, i.e. not yet turned into POs) the plan's
+    shortages are already spoken for, so a second run is refused with 409 rather
+    than stacking another full-tonnage order. Once POs exist the volume is
+    counted as in-transit instead (OPEN_PO_STATES includes DRAFT)."""
+    existing = _open_coverage_req(session)
+    if existing is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"Coverage requisition {existing.number} is still in flight "
+                f"({existing.status}); action it before planning another order"
+            ),
+        )
     page = order_page(session)
     order_lines: list[tuple[str, float]] = []      # (sku, order_kg)
     for plan in page["container_plans"]:

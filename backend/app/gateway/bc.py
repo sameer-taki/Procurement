@@ -98,29 +98,40 @@ class BCAdapter:
         except Exception:
             return None
 
-    def get_usage_entries(self) -> list[dict]:
+    def get_usage_entries(self, months: int = 6) -> list[dict]:
         """Monthly consumption per item — the BC usage export the planning run
         imports (SOP step 3). The usage originates in Kiwiplan (paper consumed by
         Jobs) and is passed to BC; BC's item ledger is the export we read.
 
         Returns [{sku, period 'YYYY-MM', quantity}] with quantity in the item's
-        base UOM (KG for paper). Demo data until BC is wired.
+        base UOM (KG for paper), covering the trailing `months` calendar months
+        (the planning window plus headroom — never the whole ledger, which on a
+        live BC is years of postings and would stall the import for minutes).
+        Demo data until BC is wired.
 
         Live mode reads the item-ledger OData entity (settings.bc_usage_entity)
-        filtered to consumption entries and aggregates client-side by item +
-        posting month. Standard BC V4 field names are assumed (Item_No /
-        Posting_Date / Quantity, consumption negative); confirm the entity name +
+        filtered to consumption entries since the window start and aggregates
+        client-side by item + posting month. Quantities are SUMMED SIGNED per
+        month, then flipped: consumption posts negative and a reversal /
+        correction posts positive, so netting (not abs-per-entry) keeps a
+        corrected posting from inflating usage. Standard BC V4 field names are
+        assumed (Item_No / Posting_Date / Quantity); confirm the entity name +
         which Entry_Type values represent Kiwiplan-fed usage for this tenant
         (CLAUDE.md §7) before going live.
         """
         if self.use_fakes:
             return fakes.usage_entries()
 
+        from .planning import trailing_periods
+        window_start = trailing_periods(months)[0] + "-01"
         url = f"{self._company_url()}/{settings.bc_usage_entity}"
         by_item_month: dict[tuple, float] = {}
         params = {
             # TODO: confirm the Entry_Type filter value(s) for this tenant.
-            "$filter": "Entry_Type eq 'Consumption'",
+            "$filter": (
+                "Entry_Type eq 'Consumption' "
+                f"and Posting_Date ge {window_start}"
+            ),
             "$select": "Item_No,Posting_Date,Quantity",
         }
         while url:
@@ -132,13 +143,13 @@ class BCAdapter:
                 if not sku or len(posted) < 7:
                     continue
                 period = posted[:7]
-                # Consumption posts negative quantities in the item ledger.
-                qty = abs(float(x.get("Quantity") or 0))
                 key = (sku, period)
-                by_item_month[key] = by_item_month.get(key, 0.0) + qty
+                by_item_month[key] = by_item_month.get(key, 0.0) + float(x.get("Quantity") or 0)
             url = data.get("@odata.nextLink")
+        # Net consumption is the negative of the signed sum; a month whose
+        # corrections outweigh its consumption clamps to zero, never negative.
         return [
-            {"sku": sku, "period": period, "quantity": qty}
+            {"sku": sku, "period": period, "quantity": max(0.0, -qty)}
             for (sku, period), qty in sorted(by_item_month.items())
         ]
 

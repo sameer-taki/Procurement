@@ -204,6 +204,11 @@ def update_shipment(
     if not changes:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
                             detail="No fields to update")
+    # status is NOT NULL: an explicit null in the payload is a client error, not
+    # a 500 from the database constraint.
+    if "status" in changes and changes["status"] is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="status cannot be null")
     for field, value in changes.items():
         setattr(shipment, field, value)
     shipment.updated_at = datetime.utcnow()

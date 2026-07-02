@@ -127,3 +127,47 @@ export function nextArrival(rows = []) {
   const etas = (rows || []).map((r) => r.next_eta).filter(Boolean).sort()
   return etas[0] || null
 }
+
+// Gate for 'Create suggested requisition' — mirrors the backend's own
+// conditions rather than a proxy metric: the endpoint no-ops when there are no
+// container plans and 409s while a coverage requisition is still in flight.
+// (below_cover is a display metric: allocated demand can require an order even
+// when every grade shows at/above cover.) Returns {enabled, reason}.
+export function canCreateSuggestion(page = {}) {
+  const open = page.open_coverage_requisition
+  if (open) {
+    return {
+      enabled: false,
+      reason: `Coverage requisition ${open.number} is still in flight (${open.status})`,
+    }
+  }
+  if (!(page.container_plans || []).length) {
+    return { enabled: false, reason: 'Nothing to order — all grades at or above cover' }
+  }
+  return { enabled: true, reason: null }
+}
+
+// Basis chip text: flags a partially entered forecast window ('FORECAST 1/3')
+// so a planner can tell 'months not yet forecast' from a full window.
+export function basisLabel(row = {}, coverMonths = 3) {
+  const basis = row.basis || 'NONE'
+  const covered = Number(row.forecast_periods)
+  if (basis === 'FORECAST' && Number.isFinite(covered) && covered > 0 && covered < coverMonths) {
+    return `FORECAST ${covered}/${coverMonths}`
+  }
+  return basis
+}
+
+// Freshest stock timestamp across order-page rows (max as_of, matching the
+// backend's _latest_as_of convention); null when no row carries one.
+export function latestAsOf(rows = []) {
+  const stamps = (rows || []).map((r) => r.as_of).filter(Boolean).sort()
+  return stamps.length ? stamps[stamps.length - 1] : null
+}
+
+// Default value for a <input type="month">: the LOCAL current month. Fiji is
+// UTC+12, so toISOString()-based defaults would show last month for the first
+// twelve hours of every month.
+export function localMonthValue(d = new Date()) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
+}

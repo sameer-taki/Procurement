@@ -12,6 +12,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from ..auth.deps import CurrentUser, get_current_user
@@ -24,7 +25,10 @@ router = APIRouter(prefix="/api", tags=["forecasts"])
 # mirrors the other mutator gates (VIEWER/REQUESTER/bare APPROVER read only).
 FORECAST_EDITOR_ROLES = {"OFFICER", "ADMIN"}
 
-PERIOD_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
+# \Z, not $: '$' would accept a trailing newline, and a period of "2026-07\n"
+# passes validation but never matches the planning window's exact-string query,
+# so the forecast would silently vanish from the Order Page.
+PERIOD_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])\Z")
 
 # Upper bound on one upsert batch: a full year for every customer/item pair a
 # planner would realistically paste in one go; oversized payloads -> 422.
@@ -102,7 +106,12 @@ def upsert_forecasts(
     user: CurrentUser = Depends(get_current_user),
 ):
     """Bulk upsert: each (customer, sku, period) replaces any existing figure.
-    All lines validate before anything is written (atomic batch)."""
+    All lines validate before anything is written (atomic batch).
+
+    Check-then-write is raced by a concurrent PUT of the same new key (two sales
+    users pasting the same customer's sheet): the loser's INSERT hits
+    uq_forecasts_customer_item_period. One retry re-reads and lands as an
+    UPDATE — last writer wins, which is the endpoint's contract anyway."""
     _require_editor(user)
 
     resolved: list[tuple[ForecastLineIn, Item]] = []
@@ -120,27 +129,38 @@ def upsert_forecasts(
         resolved.append((ln, item))
 
     now = datetime.utcnow()
-    written = 0
-    for ln, item in resolved:
-        existing = session.exec(
-            select(Forecast).where(
-                Forecast.customer == ln.customer,
-                Forecast.item_id == item.id,
-                Forecast.period == ln.period,
-            )
-        ).first()
-        if existing is None:
-            existing = Forecast(
-                customer=ln.customer, item_id=item.id, period=ln.period,
-                qty_cartons=ln.qty_cartons,
-            )
-        existing.qty_cartons = ln.qty_cartons
-        existing.updated_by = user.email
-        existing.updated_at = now
-        session.add(existing)
-        written += 1
-    session.commit()
-    return {"written": written}
+    last_error: Optional[IntegrityError] = None
+    for _ in range(2):
+        written = 0
+        for ln, item in resolved:
+            existing = session.exec(
+                select(Forecast).where(
+                    Forecast.customer == ln.customer,
+                    Forecast.item_id == item.id,
+                    Forecast.period == ln.period,
+                )
+            ).first()
+            if existing is None:
+                existing = Forecast(
+                    customer=ln.customer, item_id=item.id, period=ln.period,
+                    qty_cartons=ln.qty_cartons,
+                )
+            existing.qty_cartons = ln.qty_cartons
+            existing.updated_by = user.email
+            existing.updated_at = now
+            session.add(existing)
+            written += 1
+        try:
+            session.commit()
+        except IntegrityError as exc:   # lost the upsert race; retry as UPDATEs
+            session.rollback()
+            last_error = exc
+            continue
+        return {"written": written}
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail="A concurrent forecast update is in progress; retry shortly",
+    ) from last_error
 
 
 @router.delete("/forecasts/{forecast_id}", status_code=status.HTTP_204_NO_CONTENT)

@@ -67,6 +67,32 @@ def trailing_average(monthly_qty: List[float]) -> float:
     return sum(monthly_qty) / len(monthly_qty)
 
 
+def usage_basis(forecast_kg: float, forecast_periods: int,
+                history_avg: float) -> tuple:
+    """Choose the monthly-usage figure and its basis for one grade/deckle.
+
+    The SOP prefers the customer forecast, but two partial-coverage traps make a
+    naive 'forecast wins outright' rule under-plan long-lead paper:
+      * a partially ENTERED window (sales have typed 1 of the 3 months) must not
+        treat the missing months as zero — divide by the months actually covered;
+      * a partially COVERED grade (only some customers forecast; the rest of the
+        movement shows up only in history) must not discard a higher trailing
+        average — never plan below actual movement.
+    So: forecast average = forecast KG / covered months, and the planning figure
+    is max(forecast average, history average). Basis names the winning source;
+    an intentional ramp-down (real forecast below history) shows as HISTORY with
+    both figures surfaced, for the planner to override by cleaning usage history.
+
+    Returns (monthly_usage, basis) with basis FORECAST | HISTORY | NONE.
+    """
+    forecast_avg = (forecast_kg / forecast_periods) if forecast_periods else 0.0
+    monthly = max(forecast_avg, history_avg)
+    if monthly <= 0:
+        return 0.0, "NONE"
+    basis = "FORECAST" if forecast_periods and forecast_avg >= history_avg else "HISTORY"
+    return monthly, basis
+
+
 def months_of_stock(on_hand: float, in_transit: float,
                     monthly_usage: float) -> Optional[float]:
     """The SOP coverage metric: (on-hand + in-transit) / monthly usage.

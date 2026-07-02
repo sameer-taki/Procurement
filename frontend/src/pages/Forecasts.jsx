@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom'
 import { api } from '../api.js'
 import { useAuth } from '../auth.jsx'
 import { num, relativeTime } from '../format.js'
-import { buildForecastPayload, canPlanPaper, monthLabel } from '../paperPlanning.js'
+import { buildForecastPayload, canPlanPaper, localMonthValue, monthLabel } from '../paperPlanning.js'
 
 // Customer carton forecasts — the FORECAST basis the Order Page explodes
 // through the BOMs into paper usage. Anyone can read; officer/admin upsert
@@ -133,7 +133,9 @@ function ForecastForm({ onSaved, setUser }) {
   const [q, setQ] = useState('')
   const [results, setResults] = useState([])
   const [item, setItem] = useState(null) // {sku, name}
-  const [period, setPeriod] = useState(() => new Date().toISOString().slice(0, 7))
+  // Local month, not toISOString(): Fiji is UTC+12, so the UTC month is still
+  // last month for the first twelve hours of every month.
+  const [period, setPeriod] = useState(() => localMonthValue())
   const [qty, setQty] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)

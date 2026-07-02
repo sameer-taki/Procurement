@@ -650,3 +650,126 @@ def test_coverage_requisition_becomes_whole_fcl_pos(client, engine):
     assert by_sku["BX200-1950"] == pytest.approx(12500)
     assert by_sku["HP140-1490"] == pytest.approx(57827.5)
     assert by_sku["RF135-1000"] == pytest.approx(29672.5)
+
+
+# --------------------------------------------------------------------------- #
+# Basis blending: partial forecast windows + forecasts below actual movement
+# --------------------------------------------------------------------------- #
+def test_partial_forecast_window_averages_covered_months(client, engine):
+    """One entered month must not read the missing months as zero demand: the
+    forecast average divides by the months actually covered. CWT140-1400 with
+    only the current month's 42000 cartons: forecast avg = 42000*0.42*1.04/1 =
+    18345.6 > history 18033.33, so basis stays FORECAST at the full monthly
+    figure instead of collapsing to 6115.2 (the /3 bug)."""
+    keep = forward_periods(1)[0]
+    with Session(engine) as s:
+        for f in s.exec(select(Forecast)).all():
+            if f.period != keep:
+                s.delete(f)
+        s.commit()
+    as_role("VIEWER")
+    rows = {r["sku"]: r for r in client.get("/api/planning/order-page").json()["rows"]}
+    row = rows["CWT140-1400"]
+    assert row["basis"] == "FORECAST"
+    assert row["forecast_periods"] == 1
+    assert row["monthly_usage"] == pytest.approx(18345.6)
+    assert row["monthly_history"] == pytest.approx((17200 + 18900 + 18000) / 3)
+    # requirement = 3*18345.6 + 6000 - 30000
+    assert row["requirement_kg"] == pytest.approx(31036.8)
+
+
+def test_small_forecast_never_plans_below_history(client, engine):
+    """A grade whose forecast covers only part of its movement (one customer of
+    many) must not discard the trailing average: 1000 cartons/month explodes to
+    436.8 kg/month for CWT140-1400, far below its 18033.33 history — the plan
+    uses history and says so."""
+    with Session(engine) as s:
+        for f in s.exec(select(Forecast)).all():
+            f.qty_cartons = 1000
+            s.add(f)
+        s.commit()
+    as_role("VIEWER")
+    rows = {r["sku"]: r for r in client.get("/api/planning/order-page").json()["rows"]}
+    row = rows["CWT140-1400"]
+    assert row["basis"] == "HISTORY"
+    assert row["forecast_periods"] == 3
+    assert row["monthly_forecast"] == pytest.approx(1000 * 0.42 * 1.04)
+    assert row["monthly_usage"] == pytest.approx((17200 + 18900 + 18000) / 3)
+
+
+def test_zero_consumption_month_counts_in_average(client, engine):
+    """A window month with no usage row is ZERO movement, not absent (live BC
+    emits no row for a quiet month). Deleting BX200-1950's middle trailing month
+    (5200): monthly = (4900+0+4900)/3 = 3266.67, not (4900+4900)/2 = 4900."""
+    middle = trailing_periods(3)[1]
+    with Session(engine) as s:
+        item = s.exec(select(Item).where(Item.sku == "BX200-1950")).first()
+        row = s.exec(select(UsageHistory).where(
+            UsageHistory.item_id == item.id, UsageHistory.period == middle)).first()
+        s.delete(row)
+        s.commit()
+    as_role("VIEWER")
+    rows = {r["sku"]: r for r in client.get("/api/planning/order-page").json()["rows"]}
+    row = rows["BX200-1950"]
+    assert row["monthly_usage"] == pytest.approx((4900 + 0 + 4900) / 3)
+    # requirement = 3*3266.67 + 1500 - 4000 = 7300
+    assert row["requirement_kg"] == pytest.approx(7300)
+
+
+# --------------------------------------------------------------------------- #
+# Duplicate-order guard + DRAFT POs as in-transit (SOP §9 controls)
+# --------------------------------------------------------------------------- #
+def test_suggest_orders_blocked_while_coverage_req_open(client, engine):
+    as_role("OFFICER")
+    first = client.post("/api/planning/suggest-orders", json={})
+    assert first.status_code == 200
+    number = first.json()["number"]
+
+    # The plan shows the same shortages, but a second run must not stack a
+    # second full-tonnage requisition on the one still in flight.
+    second = client.post("/api/planning/suggest-orders", json={})
+    assert second.status_code == 409
+    assert number in second.json()["detail"]
+    page = client.get("/api/planning/order-page").json()
+    assert page["open_coverage_requisition"]["number"] == number
+
+    # Cancelling releases the guard.
+    as_role("ADMIN")
+    assert client.post(
+        f"/api/requisitions/{first.json()['id']}/cancel").status_code == 200
+    as_role("OFFICER")
+    assert client.post("/api/planning/suggest-orders", json={}).status_code == 200
+
+
+def test_draft_po_counts_as_in_transit(client, engine):
+    """Between create-po (requisition CLOSED) and issue, the volume lives only on
+    the DRAFT PO — it must already count as in-transit or the next planning run
+    would double-order it."""
+    as_role("OFFICER")
+    req = client.post("/api/planning/suggest-orders", json={}).json()
+    client.post(f"/api/requisitions/{req['id']}/submit")
+    as_role("ADMIN")
+    client.post(f"/api/requisitions/{req['id']}/approve")
+    r = client.post(f"/api/requisitions/{req['id']}/create-po")
+    assert r.status_code == 201
+    assert all(po["status"] == "DRAFT" for po in r.json())
+
+    page = client.get("/api/planning/order-page").json()
+    rows = {x["sku"]: x for x in page["rows"]}
+    assert rows["CWT140-1400"]["in_transit"] == pytest.approx(50000)
+    assert rows["CWT140-1400"]["requirement_kg"] == pytest.approx(0)
+    assert page["container_plans"] == []          # nothing left to order
+    assert page["open_coverage_requisition"] is None   # req is CLOSED
+
+
+# --------------------------------------------------------------------------- #
+# Demo-seed hygiene: deleted forecasts stay deleted
+# --------------------------------------------------------------------------- #
+def test_deleted_forecasts_stay_deleted(client, engine):
+    from app.domain import stock_service
+    with Session(engine) as s:
+        for f in s.exec(select(Forecast)).all():
+            s.delete(f)
+        s.commit()
+        stock_service.refresh_all(s)
+        assert s.exec(select(Forecast)).all() == []   # marker blocks re-seed

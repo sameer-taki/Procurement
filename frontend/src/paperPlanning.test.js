@@ -1,13 +1,17 @@
 import { describe, it, expect } from 'vitest'
 import {
   SHIPMENT_STATUSES,
+  basisLabel,
   belowCover,
   buildForecastPayload,
   buildShipmentPayload,
+  canCreateSuggestion,
   canPlanPaper,
   canRecordShipment,
   coverBadge,
   fmtTonnes,
+  latestAsOf,
+  localMonthValue,
   monthLabel,
   nextArrival,
   shipmentNextStatuses,
@@ -207,5 +211,67 @@ describe('nextArrival', () => {
     expect(nextArrival([{ next_eta: null }, {}])).toBe(null)
     expect(nextArrival([])).toBe(null)
     expect(nextArrival()).toBe(null)
+  })
+})
+
+describe('canCreateSuggestion', () => {
+  it('blocks while a coverage requisition is in flight, naming it', () => {
+    const g = canCreateSuggestion({
+      container_plans: [{ containers: 2 }],
+      open_coverage_requisition: { id: 'x', number: 'REQ-1', status: 'IN_APPROVAL' },
+    })
+    expect(g.enabled).toBe(false)
+    expect(g.reason).toContain('REQ-1')
+    expect(g.reason).toContain('IN_APPROVAL')
+  })
+  it('blocks when there is nothing to order (no container plans)', () => {
+    const g = canCreateSuggestion({ container_plans: [], open_coverage_requisition: null })
+    expect(g.enabled).toBe(false)
+    expect(g.reason).toMatch(/nothing to order/i)
+  })
+  it('enables when plans exist and nothing is in flight — even if below_cover is 0', () => {
+    const g = canCreateSuggestion({
+      below_cover: 0,
+      container_plans: [{ containers: 1 }],
+      open_coverage_requisition: null,
+    })
+    expect(g).toEqual({ enabled: true, reason: null })
+  })
+  it('is safe on an empty page object', () => {
+    expect(canCreateSuggestion({}).enabled).toBe(false)
+  })
+})
+
+describe('basisLabel', () => {
+  it('flags a partially entered forecast window', () => {
+    expect(basisLabel({ basis: 'FORECAST', forecast_periods: 1 }, 3)).toBe('FORECAST 1/3')
+    expect(basisLabel({ basis: 'FORECAST', forecast_periods: 2 }, 3)).toBe('FORECAST 2/3')
+  })
+  it('shows the plain basis for full windows, history, and none', () => {
+    expect(basisLabel({ basis: 'FORECAST', forecast_periods: 3 }, 3)).toBe('FORECAST')
+    expect(basisLabel({ basis: 'HISTORY', forecast_periods: 1 }, 3)).toBe('HISTORY')
+    expect(basisLabel({ basis: 'NONE' }, 3)).toBe('NONE')
+    expect(basisLabel({}, 3)).toBe('NONE')
+  })
+})
+
+describe('latestAsOf', () => {
+  it('returns the freshest stamp across rows', () => {
+    expect(latestAsOf([
+      { as_of: '2026-07-02T01:00:00' },
+      { as_of: '2026-07-02T03:00:00' },
+      { as_of: null },
+    ])).toBe('2026-07-02T03:00:00')
+  })
+  it('is null when no row carries a stamp', () => {
+    expect(latestAsOf([])).toBeNull()
+    expect(latestAsOf([{ as_of: null }])).toBeNull()
+  })
+})
+
+describe('localMonthValue', () => {
+  it('formats the LOCAL year-month with zero padding', () => {
+    expect(localMonthValue(new Date(2026, 0, 15))).toBe('2026-01')
+    expect(localMonthValue(new Date(2026, 11, 1))).toBe('2026-12')
   })
 })

@@ -345,3 +345,15 @@ def test_viewer_cannot_patch_shipment(client):
     as_role("VIEWER")
     assert client.patch(f"/api/shipments/{sid}",
                         json={"vessel": "X"}).status_code == 403
+
+
+def test_patch_explicit_null_status_is_400(client):
+    """An explicit "status": null must be a client error, not a database
+    NOT NULL constraint blowing up as a 500."""
+    po = _issued_po(client)
+    as_role("OFFICER")
+    ship = client.post(f"/api/purchase-orders/{po['id']}/shipments",
+                       json={"vessel": "Null Test"}).json()
+    r = client.patch(f"/api/shipments/{ship['id']}", json={"status": None})
+    assert r.status_code == 400
+    assert "null" in r.json()["detail"]

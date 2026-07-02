@@ -249,3 +249,14 @@ def test_unauthenticated_is_401(client):
     r = client.put("/api/forecasts", json={"lines": [
         _line("Acme Beverages", "BOX-RSC-A", forward_periods(1)[0], 10)]})
     assert r.status_code == 401
+
+
+def test_period_with_trailing_newline_rejected(client):
+    """'2026-07\\n' must fail validation: it would pass a $-anchored regex but
+    never match the planning window's exact-string query, so the forecast would
+    silently vanish from the Order Page."""
+    as_role("OFFICER")
+    r = client.put("/api/forecasts", json={"lines": [{
+        "customer": "Fiji Water", "sku": "CTN-FIJIWATER-1L",
+        "period": "2026-07\n", "qty_cartons": 100}]})
+    assert r.status_code == 400

@@ -4,7 +4,8 @@ import { api } from '../api.js'
 import { useAuth } from '../auth.jsx'
 import { num, relativeTime } from '../format.js'
 import {
-  belowCover, canPlanPaper, coverBadge, fmtTonnes, monthLabel, nextArrival,
+  basisLabel, belowCover, canCreateSuggestion, canPlanPaper, coverBadge,
+  fmtTonnes, latestAsOf, monthLabel, nextArrival,
 } from '../paperPlanning.js'
 
 // The GML procurement SOP "Order Page": every paper grade with its usage basis
@@ -70,10 +71,12 @@ export default function PaperPlanning() {
   const rows = data.rows || []
   const plans = data.container_plans || []
   const skipped = data.skipped_forecasts || []
-  const asOf = rows.length ? rows[0].as_of : null
+  const asOf = latestAsOf(rows)
   const eta = nextArrival(rows)
   const window = data.window || []
   const canPlan = canPlanPaper(user)
+  const suggestGate = canCreateSuggestion(data)
+  const openReq = data.open_coverage_requisition
 
   return (
     <div>
@@ -94,8 +97,8 @@ export default function PaperPlanning() {
             <button
               className="btn btn-primary"
               onClick={createRequisition}
-              disabled={!!busy || data.below_cover === 0}
-              title={data.below_cover === 0 ? 'All grades at or above cover' : undefined}
+              disabled={!!busy || !suggestGate.enabled}
+              title={suggestGate.reason || undefined}
             >
               {busy === 'suggest' ? 'Creating…' : 'Create suggested requisition'}
             </button>
@@ -105,6 +108,14 @@ export default function PaperPlanning() {
 
       {error && <div className="error">{error}</div>}
       {notice && <div className="banner">{notice}</div>}
+      {openReq && (
+        <div className="banner">
+          Coverage requisition{' '}
+          <Link to={`/requisitions/${openReq.id}`}>{openReq.number}</Link>{' '}
+          is still in flight ({openReq.status}) — its volume is already spoken for;
+          action it before planning another order.
+        </div>
+      )}
       {skipped.length > 0 && (
         <div className="banner warn">
           Forecasts skipped (no BOM to explode): {skipped.join(', ')} — paper usage for these
@@ -139,7 +150,11 @@ export default function PaperPlanning() {
               <td><Link to={`/stock/${r.sku}`}>{r.sku}</Link></td>
               <td>{r.grade || '—'}</td>
               <td className="r nowrap">{r.deckle_mm != null ? <>{num(r.deckle_mm)} <span className="muted small">mm</span></> : '—'}</td>
-              <td><span className="chip">{r.basis}</span></td>
+              <td><span className="chip" title={
+                r.monthly_forecast != null || r.monthly_history != null
+                  ? `forecast ${r.monthly_forecast != null ? num(r.monthly_forecast) : '—'} / history ${r.monthly_history != null ? num(r.monthly_history) : '—'} kg/mo`
+                  : undefined
+              }>{basisLabel(r, data.cover_months)}</span></td>
               <td className="r">{num(r.monthly_usage)}</td>
               <td className="r">{num(r.usage_3mo)}</td>
               <td className="r">{num(r.on_hand)}</td>
@@ -184,9 +199,9 @@ export default function PaperPlanning() {
           </div>
           <div className="grid-2">
             {plans.map((p) => (
-              <section className="card" key={p.vendor_id ?? p.vendor}>
+              <section className="card" key={p.vendor_id ?? p.vendor ?? 'unpriced'}>
                 <h2>
-                  {p.vendor}{' '}
+                  {p.vendor || <span className="muted">No vendor priced</span>}{' '}
                   <span className="muted small">
                     {num(p.containers)} × 40 ft FCL · {fmtTonnes(p.total_kg)}
                   </span>

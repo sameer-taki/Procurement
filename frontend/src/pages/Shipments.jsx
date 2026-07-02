@@ -77,8 +77,9 @@ export default function Shipments() {
         </tbody>
       </table>
       <p className="muted small">
-        Record a shipment from its purchase order page; ON_WATER weight shows as “in transit” on
-        the Order Page coverage maths.
+        Record a shipment from its purchase order page. The Order Page's “in transit” figure is the
+        open PO's remaining volume — shipments feed the arrival ETA. Cancelling a shipment does not
+        release that volume; cancel or amend the PO itself.
       </p>
     </div>
   )
