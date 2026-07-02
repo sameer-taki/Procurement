@@ -12,6 +12,8 @@ import {
   fmtTonnes,
   latestAsOf,
   localMonthValue,
+  flaggedVariances,
+  fmtVariance,
   monthLabel,
   nextArrival,
   shipmentNextStatuses,
@@ -273,5 +275,34 @@ describe('localMonthValue', () => {
   it('formats the LOCAL year-month with zero padding', () => {
     expect(localMonthValue(new Date(2026, 0, 15))).toBe('2026-01')
     expect(localMonthValue(new Date(2026, 11, 1))).toBe('2026-12')
+  })
+})
+
+describe('flaggedVariances', () => {
+  it('keeps only the rows needing investigation', () => {
+    const recon = {
+      rows: [
+        { sku: 'RF135-1000', flagged: true },
+        { sku: 'CWT140-1400', flagged: false },
+        { sku: 'TL125-1600', flagged: true },
+      ],
+    }
+    expect(flaggedVariances(recon).map((r) => r.sku)).toEqual(['RF135-1000', 'TL125-1600'])
+  })
+  it('is safe on empty/missing input', () => {
+    expect(flaggedVariances({})).toEqual([])
+    expect(flaggedVariances()).toEqual([])
+  })
+})
+
+describe('fmtVariance', () => {
+  it('signs the KG figure', () => {
+    expect(fmtVariance(-760)).toBe('−760 kg')
+    expect(fmtVariance(1234.5)).toBe('+1,234.5 kg')
+    expect(fmtVariance(0)).toBe('0 kg')
+  })
+  it('reads null as missing from BC', () => {
+    expect(fmtVariance(null)).toBe('not in BC')
+    expect(fmtVariance(undefined)).toBe('not in BC')
   })
 })

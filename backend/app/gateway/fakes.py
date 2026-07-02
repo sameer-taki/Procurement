@@ -424,6 +424,23 @@ def item_price(sku: str) -> Optional[float]:
     return row["sales_price"] if row else None
 
 
+# BC's paper-inventory figure per SKU (the item master's Inventory flowfield,
+# maintained from Kiwiplan's usage postings). Mostly equal to the operational
+# on-hand so the reconciliation view reads clean; RF135-1000 deliberately
+# disagrees so the SOP §9 variance control has something to show in demo mode
+# (a usage posting BC has that the roll store count doesn't reflect).
+_BC_INVENTORY_VARIANCE_KG = {"RF135-1000": -760.0}
+
+
+def bc_inventory() -> dict:
+    """{sku: BC on-hand} as BCAdapter.get_inventory would report it."""
+    return {
+        row["sku"]: sum(s["on_hand"] for s in row["stock"])
+        + _BC_INVENTORY_VARIANCE_KG.get(row["sku"], 0.0)
+        for row in CATALOG
+    }
+
+
 def _stock_rows(ref: Optional[str], system: str) -> list[dict]:
     row = _BY_SKU.get(ref or "")
     if not row:

@@ -81,6 +81,10 @@ OPEN_REQ_STATES = {"DRAFT", "SUBMITTED", "IN_APPROVAL", "APPROVED"}
 # How many trailing months of movement back the non-forecast fallback (SOP step 5).
 HISTORY_MONTHS = 3
 
+# BC-vs-production stock agreement tighter than this is treated as rounding, not
+# a variance to investigate (both sides are KG figures for whole rolls).
+RECON_TOLERANCE_KG = 1.0
+
 
 def _require_planner(user: CurrentUser) -> None:
     if user.role_code not in PLANNER_ROLES:
@@ -149,6 +153,21 @@ def _paper_items(session: Session) -> list[Item]:
     return session.exec(
         select(Item).where(Item.grade.is_not(None), Item.active == True)  # noqa: E712
     ).all()
+
+
+def _ungraded_roll_skus(session: Session) -> list[str]:
+    """Roll stock the planning run can't see: a deckle recorded but no grade.
+
+    Since 'has a grade' is what admits an item to paper planning, a roll SKU whose
+    BC master is missing the grade silently drops out of the Order Page — the
+    SOP §9 data-integrity control says surface it, not swallow it."""
+    return list(session.exec(
+        select(Item.sku).where(
+            Item.grade.is_(None),
+            Item.deckle_mm.is_not(None),
+            Item.active == True,  # noqa: E712
+        ).order_by(Item.sku)
+    ).all())
 
 
 def forecast_kg_by_item(
@@ -376,6 +395,9 @@ def order_page(session: Session, today: Optional[date] = None) -> dict:
         "rows": rows,
         "container_plans": plan_out,
         "skipped_forecasts": skipped_forecasts,
+        # Roll stock excluded from planning because the item master has a deckle
+        # but no grade — master-data fix needed in BC (SOP §9 data integrity).
+        "ungraded_roll_skus": _ungraded_roll_skus(session),
         "below_cover": sum(
             1 for r in rows
             if r["months_of_stock"] is not None
@@ -387,6 +409,74 @@ def order_page(session: Session, today: Optional[date] = None) -> dict:
             {"id": open_req.id, "number": open_req.number, "status": open_req.status}
             if open_req else None
         ),
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Reconciliation (SOP §9: reconcile physical stock to BC; investigate variances
+# by grade/deckle)
+# --------------------------------------------------------------------------- #
+def reconciliation(session: Session) -> dict:
+    """BC's paper inventory vs the operational roll stock, per grade/deckle.
+
+    BC maintains paper inventory from Kiwiplan's usage postings; the production
+    systems report the physical roll stock the snapshots mirror. When the two
+    drift (a usage posting missing in BC, an unposted receipt, a miscounted
+    rack), the SOP's control is to investigate by grade/deckle — this view is
+    that check. A paper item missing from BC's inventory read entirely is also
+    flagged (it cannot be reconciled at all).
+    """
+    items = _paper_items(session)
+    item_ids = [it.id for it in items]
+    snaps = session.exec(
+        select(StockSnapshot).where(StockSnapshot.item_id.in_(item_ids))
+    ).all() if item_ids else []
+    op: dict[str, dict] = {}
+    for s in snaps:
+        agg = op.setdefault(s.item_id, {"kg": 0.0, "systems": set(), "as_of": None})
+        agg["kg"] += s.on_hand
+        agg["systems"].add(s.system)
+        if agg["as_of"] is None or s.as_of > agg["as_of"]:
+            agg["as_of"] = s.as_of
+
+    try:
+        bc_inventory = bc.get_inventory()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"BC inventory read failed: {exc}",
+        ) from exc
+
+    rows = []
+    for it in items:
+        agg = op.get(it.id, {"kg": 0.0, "systems": set(), "as_of": None})
+        bc_kg = bc_inventory.get(it.sku)
+        variance = (bc_kg - agg["kg"]) if bc_kg is not None else None
+        flagged = variance is None or abs(variance) > RECON_TOLERANCE_KG
+        rows.append({
+            "sku": it.sku,
+            "grade": it.grade,
+            "deckle_mm": it.deckle_mm,
+            "operational_kg": agg["kg"],
+            "systems": sorted(agg["systems"]),
+            "bc_kg": bc_kg,
+            "variance_kg": variance,
+            "flagged": flagged,
+            "as_of": agg["as_of"].isoformat() if agg["as_of"] else None,
+        })
+    # Flagged first, biggest discrepancy first; unreconcilable (no BC figure)
+    # ahead of everything since there is nothing to net it against.
+    rows.sort(key=lambda r: (
+        not r["flagged"],
+        -(abs(r["variance_kg"]) if r["variance_kg"] is not None else float("inf")),
+        r["sku"],
+    ))
+    return {
+        "tolerance_kg": RECON_TOLERANCE_KG,
+        "checked": len(rows),
+        "flagged": sum(1 for r in rows if r["flagged"]),
+        "mode": "demo" if bc.use_fakes else "live",
+        "rows": rows,
     }
 
 
@@ -498,6 +588,14 @@ def order_page_endpoint(
     _: CurrentUser = Depends(get_current_user),
 ):
     return order_page(session)
+
+
+@router.get("/planning/reconciliation")
+def reconciliation_endpoint(
+    session: Session = Depends(get_session),
+    _: CurrentUser = Depends(get_current_user),
+):
+    return reconciliation(session)
 
 
 @router.post("/planning/import-usage")

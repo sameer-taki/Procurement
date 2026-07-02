@@ -171,3 +171,19 @@ export function latestAsOf(rows = []) {
 export function localMonthValue(d = new Date()) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
 }
+
+// Reconciliation rows needing investigation (SOP §9: variance by grade/deckle).
+// The backend already sorts flagged-first/biggest-first; this just cuts the
+// agreeing tail for display.
+export function flaggedVariances(recon = {}) {
+  return (recon.rows || []).filter((r) => r.flagged)
+}
+
+// Signed-KG display for a variance: '+760 kg' / '−760 kg'; null (no BC figure
+// to net against) reads as 'not in BC'.
+export function fmtVariance(kg) {
+  const n = Number(kg)
+  if (kg == null || !Number.isFinite(n)) return 'not in BC'
+  const sign = n > 0 ? '+' : n < 0 ? '−' : ''
+  return `${sign}${Math.abs(n).toLocaleString(undefined, { maximumFractionDigits: 1 })} kg`
+}

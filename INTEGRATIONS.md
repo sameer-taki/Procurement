@@ -72,7 +72,17 @@ The Order Page (paper planning per the procurement SOP) needs two more reads:
   mode. **Confirm:** where the BC item master carries them (item attributes, a
   category, or the item-number convention) so `_map_item` can be finished. Demo
   data keys one item per grade+deckle (`CWT140-1400`), matching the SOP's
-  "stock is tracked by grade AND deckle".
+  "stock is tracked by grade AND deckle". A roll item that arrives with a deckle
+  but **no grade** is excluded from planning and flagged on the Order Page.
+* **Reconciliation (SOP §9):** `BCAdapter.get_inventory` reads BC's on-hand per
+  item (`$select=No,Inventory` on the items entity) for the Order Page's
+  BC-vs-production stock check (`GET /api/planning/reconciliation`). **Confirm:**
+  that your items entity exposes the `Inventory` flowfield (a location-filtered
+  Item_Ledger balance may be needed if BC tracks locations the app does not).
+
+The BC usage import also runs on a schedule (default daily; `USAGE_IMPORT_ENABLED`
+/ `USAGE_IMPORT_SECONDS`) so trailing averages stay current without the manual
+"Import usage from BC" button — the SOP §9 cadence.
 
 ---
 

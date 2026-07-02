@@ -31,6 +31,13 @@ class Settings(BaseSettings):
     stock_refresh_seconds: int = 1800            # ~30 min
     seed_demo_on_empty: bool = True              # populate items + stock on first boot
 
+    # Scheduled BC usage import (SOP §9 cadence). The Order Page recomputes live
+    # on every view, but its usage_history input only moves when the BC export is
+    # imported — daily keeps the trailing averages current without waiting for an
+    # officer to press "Import usage from BC". Idempotent (upsert by item+period).
+    usage_import_enabled: bool = True
+    usage_import_seconds: int = 86400            # daily
+
     # Integration outbox processor (retries reliable BC posting; idempotent)
     outbox_process_enabled: bool = True
     outbox_process_seconds: int = 60             # drain pending BC posts ~every minute

@@ -5,7 +5,7 @@ import { useAuth } from '../auth.jsx'
 import { num, relativeTime } from '../format.js'
 import {
   basisLabel, belowCover, canCreateSuggestion, canPlanPaper, coverBadge,
-  fmtTonnes, latestAsOf, monthLabel, nextArrival,
+  flaggedVariances, fmtTonnes, fmtVariance, latestAsOf, monthLabel, nextArrival,
 } from '../paperPlanning.js'
 
 // The GML procurement SOP "Order Page": every paper grade with its usage basis
@@ -18,6 +18,7 @@ export default function PaperPlanning() {
   const { user, setUser } = useAuth()
   const navigate = useNavigate()
   const [data, setData] = useState(null)
+  const [recon, setRecon] = useState(null)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [busy, setBusy] = useState('')
@@ -26,6 +27,10 @@ export default function PaperPlanning() {
     api.get('/api/planning/order-page')
       .then(setData)
       .catch((e) => (e.status === 401 ? setUser(null) : setError(e.message)))
+    // SOP §9 reconciliation — degrade gracefully (no card) if the BC read fails.
+    api.get('/api/planning/reconciliation')
+      .then(setRecon)
+      .catch(() => setRecon(null))
   }, [setUser])
 
   useEffect(load, [load])
@@ -71,6 +76,8 @@ export default function PaperPlanning() {
   const rows = data.rows || []
   const plans = data.container_plans || []
   const skipped = data.skipped_forecasts || []
+  const ungraded = data.ungraded_roll_skus || []
+  const variances = flaggedVariances(recon || {})
   const asOf = latestAsOf(rows)
   const eta = nextArrival(rows)
   const window = data.window || []
@@ -120,6 +127,12 @@ export default function PaperPlanning() {
         <div className="banner warn">
           Forecasts skipped (no BOM to explode): {skipped.join(', ')} — paper usage for these
           finished goods falls back to history.
+        </div>
+      )}
+      {ungraded.length > 0 && (
+        <div className="banner warn">
+          Roll stock missing a grade in the item master: {ungraded.join(', ')} — excluded
+          from paper planning until the grade is set in BC.
         </div>
       )}
 
@@ -224,6 +237,50 @@ export default function PaperPlanning() {
             ))}
           </div>
         </>
+      )}
+
+      {recon && (
+        <section className="card" style={{ marginTop: 16 }}>
+          <h2>
+            Stock reconciliation{' '}
+            <span className="muted small thin">
+              BC paper inventory vs production roll stock · <span className={`badge ${recon.mode}`}>{recon.mode}</span>
+            </span>
+          </h2>
+          {variances.length === 0 ? (
+            <p className="ok-text">
+              All {num(recon.checked)} grades agree within ±{num(recon.tolerance_kg)} kg.
+            </p>
+          ) : (
+            <>
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>SKU</th><th>Grade</th><th className="r">Deckle</th>
+                    <th className="r">Production (kg)</th><th className="r">BC (kg)</th>
+                    <th className="r">Variance</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {variances.map((r) => (
+                    <tr key={r.sku} className="row-warn">
+                      <td><Link to={`/stock/${r.sku}`}>{r.sku}</Link></td>
+                      <td>{r.grade || '—'}</td>
+                      <td className="r">{r.deckle_mm != null ? num(r.deckle_mm) : '—'}</td>
+                      <td className="r">{num(r.operational_kg)}<span className="muted small"> {(r.systems || []).join(' + ')}</span></td>
+                      <td className="r">{r.bc_kg != null ? num(r.bc_kg) : '—'}</td>
+                      <td className="r warn">{fmtVariance(r.variance_kg)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <p className="muted small">
+                {num(recon.flagged)} of {num(recon.checked)} grades outside ±{num(recon.tolerance_kg)} kg —
+                confirm Kiwiplan usage postings reached BC and reconcile the physical count (SOP §9).
+              </p>
+            </>
+          )}
+        </section>
       )}
 
       {!canPlan && (

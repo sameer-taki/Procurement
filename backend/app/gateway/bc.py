@@ -19,6 +19,7 @@ F_NO = "No"
 F_NAME = "Description"
 F_UOM = "Base_Unit_of_Measure"
 F_PRICE = "Unit_Price"
+F_INVENTORY = "Inventory"
 
 
 class BCAdapter:
@@ -152,6 +153,34 @@ class BCAdapter:
             {"sku": sku, "period": period, "quantity": max(0.0, -qty)}
             for (sku, period), qty in sorted(by_item_month.items())
         ]
+
+    def get_inventory(self) -> dict:
+        """On-hand inventory per item ({sku: quantity in base UOM}) — BC's
+        paper-inventory figure, maintained from Kiwiplan's usage postings.
+
+        Used by the SOP §9 reconciliation control: BC's figure is checked against
+        the operational roll stock the production systems report, and variances by
+        grade/deckle are surfaced for investigation. Demo data until BC is wired.
+
+        Live mode reads the item master with $select=No,Inventory (the standard
+        BC V4 flowfield; TODO: confirm the field name for this tenant — a location
+        -filtered Item_Ledger balance may be needed if Inventory spans locations
+        the app does not track).
+        """
+        if self.use_fakes:
+            return fakes.bc_inventory()
+        url = f"{self._company_url()}/{settings.bc_items_entity}"
+        params = {"$select": f"{F_NO},{F_INVENTORY}"}
+        out: dict = {}
+        while url:
+            data = self._get(url, params)
+            params = None          # nextLink already carries the query
+            for x in data.get("value", []):
+                no = x.get(F_NO)
+                if no:
+                    out[no] = float(x.get(F_INVENTORY) or 0)
+            url = data.get("@odata.nextLink")
+        return out
 
     def get_vendor(self, vendor_no: str) -> Optional[dict]:
         raise NotImplementedError  # Phase 3
