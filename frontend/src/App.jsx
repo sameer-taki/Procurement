@@ -80,7 +80,7 @@ function Shell() {
         </Routes>
       </main>
       <footer className="footer muted">
-        Phase 5 · Receiving · GRNs post to BC for the 3-way match; spend, on-time delivery & stock-turn feed the warehouse
+        Phase 6 · Paper planning · 3-month cover by grade & deckle; forecasts explode to KG, orders consolidate into 40 ft FCLs
       </footer>
     </div>
   )
