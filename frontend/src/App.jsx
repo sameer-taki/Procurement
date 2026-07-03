@@ -15,6 +15,9 @@ import PaperPlanning from './pages/PaperPlanning.jsx'
 import Forecasts from './pages/Forecasts.jsx'
 import Shipments from './pages/Shipments.jsx'
 import Analytics from './pages/Analytics.jsx'
+import Reports from './pages/Reports.jsx'
+import Admin from './pages/Admin.jsx'
+import { canAdmin } from './admin.js'
 
 export default function App() {
   return (
@@ -54,6 +57,8 @@ function Shell() {
           <NavLink to="/forecasts">Forecasts</NavLink>
           <NavLink to="/shipments">Shipping</NavLink>
           <NavLink to="/analytics">Analytics</NavLink>
+          <NavLink to="/reports">Reports</NavLink>
+          {canAdmin(user) && <NavLink to="/admin">Admin</NavLink>}
         </nav>
       </aside>
       <div className="main">
@@ -79,6 +84,8 @@ function Shell() {
             <Route path="/forecasts" element={<Forecasts />} />
             <Route path="/shipments" element={<Shipments />} />
             <Route path="/analytics" element={<Analytics />} />
+            <Route path="/reports" element={<Reports />} />
+            <Route path="/admin" element={canAdmin(user) ? <Admin /> : <Navigate to="/" replace />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </main>
