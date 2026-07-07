@@ -70,6 +70,7 @@ code change**. The defaults (override any that differ):
 | `BC_PURCHASE_PRICES_ENTITY` | `Purchase_Prices` | vendor price/MOQ sync |
 | `BC_USAGE_ENTITY` | `ItemLedgerEntries` | usage export (SOP step 3) |
 | `BC_RECEIPT_POST_ACTION` | `Microsoft.NAV.Post` | bound action that posts the receive |
+| `BC_RECEIPT_CORRELATION_FIELD` | *(blank)* | order-header field stamped with the grn_no for **exactly-once** receipt posting (e.g. `Vendor_Shipment_No`); blank = best-effort |
 | `BC_REORDER_POINT_FIELD` | `Reorder_Point` | item reorder point (0 = unset) |
 | `BC_LEAD_TIME_FIELD` | `Lead_Time_Calculation` | dateformula → days (`45D`/`2W`/`1M`) |
 | `BC_REPLENISHMENT_FIELD` | *(blank)* | e.g. `Replenishment_System`; `Prod. Order` ⇒ FINISHED |
@@ -84,6 +85,20 @@ the single place to change if your tenant renames them. All reads follow
 retried post finds the existing BC document and completes its lines instead of
 duplicating the header; receipts sum `Qty_to_Receive` per item and never re-post
 a GRN that already has its crosswalk.
+
+**Exactly-once receipts (go-live gate for live receipt writes):** the app-level
+crosswalk guard can't cover the window where BC's *Post* action succeeds but its
+HTTP response is lost — a retry would then re-receive. Closing that needs a
+correlation key **inside BC**. Set `BC_RECEIPT_CORRELATION_FIELD` to an
+order-header field BC copies onto the posted receipt (standard BC exposes
+`Vendor_Shipment_No` on both the Purchase Order and the Purch. Rcpt. Header —
+confirm it's free to repurpose as a key on your tenant). With it set, the adapter
+stamps the field with the canonical `grn_no` before posting and, on every attempt,
+first asks BC whether a receipt already carries that `grn_no`; if so it returns
+that receipt and posts nothing. Leave it **blank** and receipt posting stays
+best-effort (the documented double-post risk) — run receipts with a read-only BC
+account until the field is confirmed and set. PO posting has no such gap and is
+safe to enable regardless.
 
 ### Paper planning: the usage export + grade/deckle
 

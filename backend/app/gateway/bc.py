@@ -511,6 +511,24 @@ class BCAdapter:
         self.post_purchase_order_lines(bc_po_no, lines)
         return bc_po_no
 
+    def _posted_receipt_by_grn(self, bc_po_no: str, grn_no: str) -> Optional[str]:
+        """The posted-receipt No already carrying this grn_no in the correlation
+        field, or None. Only meaningful when bc_receipt_correlation_field is set —
+        this is the exactly-once check: its presence means the receive already
+        posted (a prior attempt whose response we may have lost)."""
+        field = settings.bc_receipt_correlation_field
+        if not field:
+            return None
+        data = self._get(f"{self._company_url()}/{settings.bc_receipt_entity}", {
+            "$filter": (
+                f"{field} eq '{_odata_str(grn_no)}' and "
+                f"Order_No eq '{_odata_str(bc_po_no)}'"
+            ),
+            "$select": F_NO, "$top": "1",
+        })
+        values = data.get("value") or []
+        return values[0].get(F_NO) if values and values[0].get(F_NO) else None
+
     def post_receipt(self, receipt: dict) -> str:
         """Post a goods receipt (GRN) to BC and return the BC receipt number.
 
@@ -519,22 +537,26 @@ class BCAdapter:
         fake BC number (the outbox idempotency guard relies on stable values).
 
         Live mode follows the standard BC receive pattern:
+          0. (exactly-once, when BC_RECEIPT_CORRELATION_FIELD is set) ask BC whether
+             a posted receipt already carries this grn_no — if so, return it and post
+             NOTHING (this is the retry-after-lost-response case);
           1. read the posted order's lines to map item No -> Line_No;
-          2. PATCH Qty_to_Receive on each received line (If-Match: *);
+          2. stamp the correlation field with grn_no on the order header (when set)
+             so the posted receipt inherits it, then PATCH Qty_to_Receive on each
+             received line (If-Match: *);
           3. invoke the posting action (settings.bc_receipt_post_action) on the
              order — BC creates the posted receipt and owns it from there;
-          4. read back the newest posted receipt for the order as the GRN number.
-        Step 4 is best-effort: once step 3 succeeds the receipt EXISTS in BC, so a
-        lookup hiccup falls back to a deterministic reference rather than raising
-        (raising would retry the whole post and double-receive).
+          4. read back the posted receipt as the GRN number — by grn_no when the
+             correlation field is set (exact), else the newest receipt for the order.
+        Step 4 falls back to a deterministic reference rather than raising on a
+        lookup hiccup (raising would retry the whole post and double-receive).
 
-        RESIDUAL RISK (confirm before enabling live receipt writes): if the step-3
-        Post action itself times out with no response, the receipt may or may not
-        have posted, and a retry re-runs steps 2-3 -> a possible DOUBLE receive.
-        Making this leg exactly-once needs a tenant-specific correlation key (e.g.
-        stamping the grn_no where the posted receipt is queryable), which must be
-        verified against the real BC first. Until then, run receipt posting with a
-        read-only BC account or reconcile posted receipts manually (CLAUDE.md §7).
+        EXACTLY-ONCE vs BEST-EFFORT: with BC_RECEIPT_CORRELATION_FIELD set, a retry
+        after a lost Post response finds the already-posted receipt at step 0 and
+        never re-receives — the post is exactly-once. With it BLANK the residual
+        risk stands: a step-3 Post that times out with no response may or may not
+        have posted, and a retry re-runs steps 2-3 -> a possible DOUBLE receive; run
+        receipts with a read-only BC account until the field is set (CLAUDE.md §7).
         """
         if self.use_fakes:
             import hashlib
@@ -548,6 +570,16 @@ class BCAdapter:
                 "(no bc_po_no) — receipt will retry after the PO posts"
             )
 
+        grn_no = receipt.get("grn_no")
+        corr_field = settings.bc_receipt_correlation_field
+
+        # 0. Exactly-once guard: already posted under this grn_no? Return it, post
+        # nothing. (No-op unless the correlation field is configured.)
+        if corr_field:
+            existing = self._posted_receipt_by_grn(bc_po_no, grn_no)
+            if existing:
+                return existing
+
         # 1. Item No -> Line_No on the BC order.
         lines_url = f"{self._company_url()}/{settings.bc_po_lines_entity}"
         data = self._get(lines_url, {
@@ -556,21 +588,30 @@ class BCAdapter:
         })
         line_no_by_item = {x.get(F_NO): x.get("Line_No") for x in data.get("value", [])}
 
-        # 2. Qty_to_Receive per received line (summed per item within the GRN).
+        # 2. Validate all received lines map to the order BEFORE any write, so an
+        # unknown item aborts with zero side effects (no partial Qty_to_Receive).
         qty_by_item: dict = {}
         for ln in receipt.get("lines") or []:
             item_no = ln.get("bc_item_no") or ln.get("sku")
             if not item_no:
                 raise RuntimeError(
-                    f"GRN {receipt.get('grn_no')}: received line missing an item No"
+                    f"GRN {grn_no}: received line missing an item No"
+                )
+            if line_no_by_item.get(item_no) is None:
+                raise RuntimeError(
+                    f"GRN {grn_no}: item {item_no} not on BC order {bc_po_no}"
                 )
             qty_by_item[item_no] = qty_by_item.get(item_no, 0.0) + float(ln.get("quantity") or 0)
+
+        po_url = f"{self._company_url()}/{settings.bc_po_entity}('{_odata_str(bc_po_no)}')"
+        # Stamp the correlation key on the order header first (when set); BC copies
+        # it onto the posted receipt, which is what makes step 0 work on retry.
+        if corr_field:
+            self._send("patch", po_url, {corr_field: grn_no}, if_match="*")
+
+        # Qty_to_Receive per received line (summed per item within the GRN).
         for item_no, qty in qty_by_item.items():
-            line_no = line_no_by_item.get(item_no)
-            if line_no is None:
-                raise RuntimeError(
-                    f"GRN {receipt.get('grn_no')}: item {item_no} not on BC order {bc_po_no}"
-                )
+            line_no = line_no_by_item[item_no]
             self._send(
                 "patch",
                 f"{lines_url}(Document_Type='Order',Document_No='{_odata_str(bc_po_no)}',Line_No={line_no})",
@@ -579,23 +620,26 @@ class BCAdapter:
             )
 
         # 3. Post the receive.
-        self._send(
-            "post",
-            f"{self._company_url()}/{settings.bc_po_entity}('{_odata_str(bc_po_no)}')/{settings.bc_receipt_post_action}",
-        )
+        self._send("post", f"{po_url}/{settings.bc_receipt_post_action}")
 
-        # 4. The posted receipt's number (best-effort; see docstring).
+        # 4. The posted receipt's number. By grn_no when the correlation field is
+        # set (exact, correct across multiple GRNs on one PO), else newest-for-order.
         try:
-            data = self._get(f"{self._company_url()}/{settings.bc_receipt_entity}", {
-                "$filter": f"Order_No eq '{_odata_str(bc_po_no)}'",
-                "$select": F_NO, "$orderby": f"{F_NO} desc", "$top": "1",
-            })
-            values = data.get("value") or []
-            if values and values[0].get(F_NO):
-                return values[0][F_NO]
+            if corr_field:
+                found = self._posted_receipt_by_grn(bc_po_no, grn_no)
+                if found:
+                    return found
+            else:
+                data = self._get(f"{self._company_url()}/{settings.bc_receipt_entity}", {
+                    "$filter": f"Order_No eq '{_odata_str(bc_po_no)}'",
+                    "$select": F_NO, "$orderby": f"{F_NO} desc", "$top": "1",
+                })
+                values = data.get("value") or []
+                if values and values[0].get(F_NO):
+                    return values[0][F_NO]
         except Exception:
             pass
-        return f"BC-RCPT-{receipt.get('grn_no')}"
+        return f"BC-RCPT-{grn_no}"
 
     def get_match_status(self, po: dict) -> str:
         """Return BC's reported 3-way match state for a PO (PO·GRN·invoice).

@@ -77,6 +77,15 @@ class Settings(BaseSettings):
     bc_customers_entity: str = "Customers"           # customer master (publish Page 22 as 'Customers')
     bc_purchase_prices_entity: str = "Purchase_Prices"  # vendor price list (price/SKU/MOQ)
     bc_receipt_post_action: str = "Microsoft.NAV.Post"  # bound action that posts the receive
+    # Exactly-once receipt posting. When set, the adapter stamps this order-header
+    # field with the canonical grn_no BEFORE posting; BC copies it onto the posted
+    # receipt, so a retry after a lost Post response can query BC for a receipt
+    # already carrying this grn_no and skip re-posting (no double receive). Standard
+    # BC exposes 'Vendor_Shipment_No' on both Purchase Order and Purch. Rcpt. Header;
+    # confirm it's free to use as a correlation key on your tenant, then set it.
+    # Blank (default) = best-effort readback only (documented double-post risk on a
+    # lost Post response — run receipts read-only until this is set). See bc.py.
+    bc_receipt_correlation_field: str = ""
     # Grade + deckle (SOP §3): name the item-master OData fields if BC carries them
     # as attributes; when BOTH are blank the adapter parses the item No against the
     # SKU pattern below (one item per grade+deckle, e.g. 'CWT140-1400').
