@@ -101,14 +101,20 @@ def upsert_user_from_claims(session: Session, claims: dict) -> Optional[User]:
         user = session.exec(select(User).where(User.email == email)).first()
 
     mapped = map_role(claims)
+    # Does this token actually carry role information? A thin claim set (no roles
+    # claim at all) must not silently demote anyone — but a token that DOES carry
+    # roles is Entra asserting the user's current entitlements, so honour it even
+    # when that means removing ADMIN (the deprovisioning path: an admin revoked in
+    # Entra loses it here on next login, not only via an in-app edit).
+    has_role_claim = bool(claims.get(settings.entra_role_claim))
     if user is None:
         user = User(email=email, name=name, entra_oid=oid, role_code=mapped, active=True)
     else:
         user.entra_oid = oid or user.entra_oid
         user.name = name or user.name
-        # Don't demote an existing ADMIN via a thin claim set; otherwise track Entra.
-        if user.role_code != "ADMIN":
+        if has_role_claim:
             user.role_code = mapped
+        # else: preserve the current role — the IdP told us nothing this time.
     session.add(user)
     session.commit()
     session.refresh(user)

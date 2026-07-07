@@ -150,9 +150,14 @@ def test_create_po_posts_header_then_lines(live):
 
 
 def test_create_po_retry_reuses_existing_header_and_lines(live):
+    # A full retry: the header exists AND both items are already on it (keyed by
+    # item No, which is how BC returns lines and how reconciliation matches).
     live._test_responses["get"] = [
         {"value": [{"No": "106001"}]},                    # header already exists
-        {"value": [{"Line_No": 10000}, {"Line_No": 20000}]},  # lines already posted
+        {"value": [
+            {"Line_No": 10000, "No": "CWT140-1400"},
+            {"Line_No": 20000, "No": "RF135-1000"},
+        ]},                                               # both items already posted
     ]
     assert live.create_purchase_order(PO_PAYLOAD) == "106001"
     assert [c for c in live._test_calls if c["method"] == "post"] == []
@@ -166,6 +171,21 @@ def test_create_po_retry_completes_missing_lines(live):
     assert live.create_purchase_order(PO_PAYLOAD) == "106001"
     posts = [c for c in live._test_calls if c["method"] == "post"]
     assert len(posts) == 2               # just the two lines, no second header
+
+
+def test_create_po_retry_completes_only_the_missing_line(live):
+    # Partial retry: one item landed before the crash, one didn't. Reconcile by
+    # item No -> post ONLY the missing line, at a Line_No past the existing max
+    # (this is the finding-#14 fix: don't drop lines a prior attempt missed).
+    live._test_responses["get"] = [
+        {"value": [{"No": "106001"}]},
+        {"value": [{"Line_No": 10000, "No": "CWT140-1400"}]},   # only the first item
+    ]
+    assert live.create_purchase_order(PO_PAYLOAD) == "106001"
+    posts = [c for c in live._test_calls if c["method"] == "post"]
+    assert len(posts) == 1
+    assert posts[0]["body"]["No"] == "RF135-1000"
+    assert posts[0]["body"]["Line_No"] == 20000        # max existing (10000) + 10000
 
 
 def test_create_po_raises_when_bc_returns_no_number(live):

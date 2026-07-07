@@ -22,20 +22,59 @@ services:
       FIRST_ADMIN_PASSWORD: "${ADMIN_PASSWORD:?}"
       FIRST_ADMIN_NAME: "Administrator"
       # --- integrations (optional until their phase; safe to leave blank) ---
+      # Business Central: connection + auth
       BC_BASE_URL: "${BC_BASE_URL:-}"
       BC_COMPANY: "${BC_COMPANY:-}"
       BC_USERNAME: "${BC_USERNAME:-}"
       BC_PASSWORD: "${BC_PASSWORD:-}"
+      BC_AUTH: "${BC_AUTH:-ntlm}"
+      BC_VERIFY_TLS: "${BC_VERIFY_TLS:-true}"
+      # BC OData entity names (override per tenant; defaults are standard BC V4)
+      BC_ITEMS_ENTITY: "${BC_ITEMS_ENTITY:-Items}"
+      BC_PO_ENTITY: "${BC_PO_ENTITY:-PurchaseOrders}"
+      BC_PO_LINES_ENTITY: "${BC_PO_LINES_ENTITY:-PurchaseOrderLines}"
+      BC_RECEIPT_ENTITY: "${BC_RECEIPT_ENTITY:-PurchRcptHeaders}"
+      BC_INVOICE_ENTITY: "${BC_INVOICE_ENTITY:-PurchInvHeaders}"
+      BC_USAGE_ENTITY: "${BC_USAGE_ENTITY:-ItemLedgerEntries}"
+      BC_VENDORS_ENTITY: "${BC_VENDORS_ENTITY:-Vendors}"
+      BC_PURCHASE_PRICES_ENTITY: "${BC_PURCHASE_PRICES_ENTITY:-Purchase_Prices}"
+      BC_RECEIPT_POST_ACTION: "${BC_RECEIPT_POST_ACTION:-Microsoft.NAV.Post}"
+      # BC paper-planning mapping (usage entry types, grade/deckle, crosswalk)
+      BC_USAGE_ENTRY_TYPES: "${BC_USAGE_ENTRY_TYPES:-Negative Adjmt.,Consumption}"
+      BC_GRADE_FIELD: "${BC_GRADE_FIELD:-}"
+      BC_DECKLE_FIELD: "${BC_DECKLE_FIELD:-}"
+      BC_PAPER_SKU_REGEX: "${BC_PAPER_SKU_REGEX:-}"
+      BC_REORDER_POINT_FIELD: "${BC_REORDER_POINT_FIELD:-Reorder_Point}"
+      BC_LEAD_TIME_FIELD: "${BC_LEAD_TIME_FIELD:-Lead_Time_Calculation}"
+      BC_REPLENISHMENT_FIELD: "${BC_REPLENISHMENT_FIELD:-}"
+      CROSSWALK_MODE: "${CROSSWALK_MODE:-sku}"
+      BC_KIWIPLAN_REF_FIELD: "${BC_KIWIPLAN_REF_FIELD:-}"
+      BC_ACCURA_REF_FIELD: "${BC_ACCURA_REF_FIELD:-}"
+      # Kiwiplan / Accura (live stock needs BOTH the DSN and the *_STOCK_SQL query)
       KIWIPLAN_DSN: "${KIWIPLAN_DSN:-}"
+      KIWIPLAN_STOCK_SQL: "${KIWIPLAN_STOCK_SQL:-}"
       ACCURA_DSN: "${ACCURA_DSN:-}"
+      ACCURA_STOCK_SQL: "${ACCURA_STOCK_SQL:-}"
+      # Azure SQL analytics warehouse (Phase 5 push)
+      AZURE_SQL_DSN: "${AZURE_SQL_DSN:-}"
+      # Schedulers (leave default unless tuning cadence)
+      STOCK_REFRESH_ENABLED: "${STOCK_REFRESH_ENABLED:-true}"
+      STOCK_REFRESH_SECONDS: "${STOCK_REFRESH_SECONDS:-1800}"
+      OUTBOX_PROCESS_ENABLED: "${OUTBOX_PROCESS_ENABLED:-true}"
+      OUTBOX_PROCESS_SECONDS: "${OUTBOX_PROCESS_SECONDS:-60}"
+      USAGE_IMPORT_ENABLED: "${USAGE_IMPORT_ENABLED:-true}"
+      USAGE_IMPORT_SECONDS: "${USAGE_IMPORT_SECONDS:-86400}"
+      # M365 Graph mailer
       GRAPH_TENANT_ID: "${GRAPH_TENANT_ID:-}"
       GRAPH_CLIENT_ID: "${GRAPH_CLIENT_ID:-}"
       GRAPH_CLIENT_SECRET: "${GRAPH_CLIENT_SECRET:-}"
       GRAPH_SENDER: "${GRAPH_SENDER:-no-reply@golden.com.fj}"
+      # Entra ID SSO
       ENTRA_TENANT_ID: "${ENTRA_TENANT_ID:-}"
       ENTRA_CLIENT_ID: "${ENTRA_CLIENT_ID:-}"
       ENTRA_CLIENT_SECRET: "${ENTRA_CLIENT_SECRET:-}"
       ENTRA_REDIRECT_URI: "${ENTRA_REDIRECT_URI:-}"
+      ENTRA_ROLE_CLAIM: "${ENTRA_ROLE_CLAIM:-roles}"
     networks:
       - web
       - default

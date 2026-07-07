@@ -37,6 +37,17 @@ from .purchasing import (
 router = APIRouter(prefix="/api/reports", tags=["reports"])
 
 
+def _csv_safe(value):
+    """Neutralise spreadsheet formula injection. A cell whose text starts with
+    = + - @ (or a leading tab/CR Excel strips before those) is executed as a
+    formula when the CSV is opened — a vendor/SKU/item name sourced from BC could
+    carry `=HYPERLINK(...)` or `=cmd|...`. Prefix such text cells with a single
+    quote so Excel/Sheets treat them as literal text. Numbers pass through."""
+    if isinstance(value, str) and value and value[0] in ("=", "+", "-", "@", "\t", "\r"):
+        return "'" + value
+    return value
+
+
 def _respond(rows: list[dict], columns: list[str], fmt: str, filename: str):
     """One serializer for both views: JSON rows for the screen, CSV (same
     columns, same order) for download."""
@@ -46,7 +57,7 @@ def _respond(rows: list[dict], columns: list[str], fmt: str, filename: str):
     buf = io.StringIO()
     writer = csv.DictWriter(buf, fieldnames=columns, extrasaction="ignore")
     writer.writeheader()
-    writer.writerows(rows)
+    writer.writerows({k: _csv_safe(v) for k, v in row.items()} for row in rows)
     return Response(
         content=buf.getvalue(),
         media_type="text/csv; charset=utf-8",

@@ -158,11 +158,24 @@ if os.path.isdir(_static):
     if os.path.isdir(_assets):
         app.mount("/assets", StaticFiles(directory=_assets), name="assets")
 
+    _index = os.path.join(_static, "index.html")
+    _static_root = os.path.realpath(_static)
+
     @app.get("/{full_path:path}", include_in_schema=False)
     async def spa(full_path: str):
         if full_path.startswith(("api/", "auth/", "health")):
             raise HTTPException(status_code=404)
-        candidate = os.path.join(_static, full_path)
-        if full_path and os.path.isfile(candidate):
-            return FileResponse(candidate)
-        return FileResponse(os.path.join(_static, "index.html"))
+        # Serve a real static file ONLY when the resolved path stays inside the
+        # build dir. os.path.join + FileResponse alone is a path-traversal hole:
+        # uvicorn percent-decodes '..%2f' into '../' AFTER routing, so a crafted
+        # path could escape _static and read arbitrary files. realpath-contain
+        # every candidate; anything outside (or not a real file) falls back to
+        # the SPA shell so client-side routes still deep-link.
+        if full_path:
+            candidate = os.path.realpath(os.path.join(_static, full_path))
+            if (
+                (candidate == _static_root or candidate.startswith(_static_root + os.sep))
+                and os.path.isfile(candidate)
+            ):
+                return FileResponse(candidate)
+        return FileResponse(_index)

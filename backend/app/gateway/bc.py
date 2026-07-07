@@ -366,34 +366,49 @@ class BCAdapter:
         values = data.get("value") or []
         return values[0].get(F_NO) if values else None
 
-    def _existing_line_count(self, bc_po_no: str) -> int:
+    def _existing_line_items(self, bc_po_no: str) -> tuple[set, int]:
+        """(item Nos already on the BC order, highest Line_No) — the retry-safety
+        read that lets us post only the lines a previous attempt didn't."""
         url = f"{self._company_url()}/{settings.bc_po_lines_entity}"
         data = self._get(url, {
-            "$filter": f"Document_No eq '{bc_po_no}'", "$select": "Line_No",
+            "$filter": f"Document_No eq '{bc_po_no}'",
+            "$select": f"Line_No,{F_NO}",
         })
-        return len(data.get("value") or [])
+        items: set = set()
+        max_line = 0
+        for x in data.get("value") or []:
+            if x.get(F_NO):
+                items.add(x.get(F_NO))
+            max_line = max(max_line, int(x.get("Line_No") or 0))
+        return items, max_line
 
     def post_purchase_order_lines(self, bc_po_no: str, lines: list[dict]) -> int:
-        """Post the order's lines, unless the document already has lines (a
-        retried create landed here before) — returns how many were written.
-        Standard page fields: Document_Type/Document_No/Line_No/Type/No/
-        Quantity/Direct_Unit_Cost; Line_No steps by 10000 as BC does."""
+        """Post the order's lines, skipping ONLY the items already on the document
+        so a retry after a partial post completes the missing lines instead of
+        dropping them. Returns how many were written. Standard page fields:
+        Document_Type/Document_No/Line_No/Type/No/Quantity/Direct_Unit_Cost;
+        Line_No continues in steps of 10000 past the highest existing line."""
         if self.use_fakes:
             return 0
-        if self._existing_line_count(bc_po_no) > 0:
-            return 0
+        existing_items, max_line = self._existing_line_items(bc_po_no)
         url = f"{self._company_url()}/{settings.bc_po_lines_entity}"
         written = 0
-        for i, ln in enumerate(lines):
+        next_line = max_line
+        for ln in lines:
+            item_no = ln.get("bc_item_no") or ln.get("sku")
+            if item_no in existing_items:
+                continue                    # already posted by a prior attempt
+            next_line += 10000
             self._send("post", url, {
                 "Document_Type": "Order",
                 "Document_No": bc_po_no,
-                "Line_No": (i + 1) * 10000,
+                "Line_No": next_line,
                 "Type": "Item",
-                "No": ln.get("bc_item_no") or ln.get("sku"),
+                "No": item_no,
                 "Quantity": ln.get("quantity"),
                 "Direct_Unit_Cost": ln.get("unit_price"),
             })
+            existing_items.add(item_no)
             written += 1
         return written
 
@@ -447,6 +462,14 @@ class BCAdapter:
         Step 4 is best-effort: once step 3 succeeds the receipt EXISTS in BC, so a
         lookup hiccup falls back to a deterministic reference rather than raising
         (raising would retry the whole post and double-receive).
+
+        RESIDUAL RISK (confirm before enabling live receipt writes): if the step-3
+        Post action itself times out with no response, the receipt may or may not
+        have posted, and a retry re-runs steps 2-3 -> a possible DOUBLE receive.
+        Making this leg exactly-once needs a tenant-specific correlation key (e.g.
+        stamping the grn_no where the posted receipt is queryable), which must be
+        verified against the real BC first. Until then, run receipt posting with a
+        read-only BC account or reconcile posted receipts manually (CLAUDE.md §7).
         """
         if self.use_fakes:
             import hashlib

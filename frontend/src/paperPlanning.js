@@ -245,7 +245,16 @@ export function fmtVariance(kg) {
 // raw (no locale formatting) so the CSV re-imports cleanly.
 export function csvCell(v) {
   if (v == null) return ''
-  const s = String(v)
+  // Numbers pass through untouched so exports re-import cleanly (a negative
+  // figure must stay a number, not become quoted text).
+  let s = String(v)
+  if (typeof v !== 'number' && s && '=+-@\t\r'.includes(s[0])) {
+    // Neutralise spreadsheet formula injection: a TEXT cell starting with
+    // = + - @ (or a leading tab/CR Excel trims before them) runs as a formula
+    // on open, and vendor/SKU/grade strings originate from BC. Prefix a quote
+    // so it stays literal text.
+    s = `'${s}`
+  }
   return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
 }
 

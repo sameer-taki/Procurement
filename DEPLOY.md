@@ -53,9 +53,9 @@ until set, that source shows clearly-flagged demo data and SSO stays off):
 |--------|---------|
 | `APP_ENV` | defaults to `production`; leave as-is |
 | `ENTRA_TENANT_ID`, `ENTRA_CLIENT_ID`, `ENTRA_CLIENT_SECRET`, `ENTRA_REDIRECT_URI` | Entra ID SSO. Set redirect to `https://procurement.gml.com.fj/auth/callback` and register the same URI in the Entra app. |
-| `BC_BASE_URL`, `BC_COMPANY`, `BC_USERNAME`, `BC_PASSWORD` | Live Business Central item master + price (replaces demo) |
-| `KIWIPLAN_DSN` | Live Kiwiplan stock read |
-| `ACCURA_DSN` | Live Accura stock read |
+| `BC_BASE_URL`, `BC_COMPANY`, `BC_USERNAME`, `BC_PASSWORD`, `BC_AUTH` | Live Business Central (item master, price, PO, usage). See INTEGRATIONS.md §2 for the full BC var set (`BC_PAPER_SKU_REGEX`, `BC_USAGE_ENTRY_TYPES`, entity overrides). |
+| `KIWIPLAN_DSN` **+** `KIWIPLAN_STOCK_SQL` | Live Kiwiplan stock read — needs **both** the DSN and the parameterised query; the DSN alone stays in demo mode |
+| `ACCURA_DSN` **+** `ACCURA_STOCK_SQL` | Live Accura stock read — needs **both** (see INTEGRATIONS.md §3–4) |
 | `GRAPH_TENANT_ID`, `GRAPH_CLIENT_ID`, `GRAPH_CLIENT_SECRET`, `GRAPH_SENDER` | Vendor email (Phase 3) |
 | `BACKUP_KEEP_DAYS/WEEKS/MONTHS` | DB backup retention |
 

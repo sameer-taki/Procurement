@@ -19,17 +19,24 @@ safely stays in demo mode.
 | `ENTRA_CLIENT_SECRET` | client secret (Portainer only) |
 | `ENTRA_REDIRECT_URI` | `https://procurement.gml.com.fj/auth/callback` |
 | `ENTRA_ROLE_CLAIM` | optional; defaults to `roles` (use `groups` if you map by group) |
+| `ENTRA_ROLE_MAP` | optional JSON: `{"<claim value or GUID>": "<local role>"}` — the recommended production mapping |
 | `DEFAULT_ROLE` | optional; role for users with no matching claim (default `VIEWER`) |
 
 **App registration:** add the redirect URI above (type *Web*), enable ID tokens, and
-either define **app roles** or emit **group** claims. The app maps the most-privileged
-role *named* in that claim to a local role (`ADMIN`/`APPROVER`/`OFFICER`/`REQUESTER`/
-`VIEWER`), case-insensitive. If your role/group names don't contain those words, send me
-the exact names → values and I'll set an explicit mapping in `map_role`.
+either define **app roles** or emit **group** claims. Role resolution is **exact**, never
+substring: each claim value is matched by `ENTRA_ROLE_MAP` (an explicit value→role map,
+the production path) or, when the map is empty, by a whole-token match of the local role
+code (`ADMIN`/`APPROVER`/`OFFICER`/`REQUESTER`/`VIEWER`, case-insensitive). Exact matching
+is deliberate so a group like `Finance-Admins` can't accidentally grant `ADMIN`. To map
+opaque group GUIDs, set `ENTRA_ROLE_MAP` — no code change needed. The most-privileged
+matched role wins.
 
 **Behaviour:** the "Sign in with Microsoft" button appears once configured; first SSO
-login auto-provisions a local user (default `VIEWER`; an existing `ADMIN` is never
-demoted). Verify: sign in via Microsoft → `/api/me` shows your mapped role.
+login auto-provisions a local user (`DEFAULT_ROLE`). On re-login, a token that **carries**
+the role claim overwrites the local role (so an admin revoked in Entra loses it here too);
+a token with **no** role claim leaves the current role untouched. The seeded local admin
+(admin-login, no Entra link) is unaffected. Verify: sign in via Microsoft → `/api/me`
+shows your mapped role.
 
 ---
 

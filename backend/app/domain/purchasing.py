@@ -17,10 +17,11 @@ import html
 import json
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import or_
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select, update
 
@@ -661,10 +662,44 @@ def _claim_row(session: Session, row_id: int) -> bool:
             IntegrationOutbox.id == row_id,
             IntegrationOutbox.status == "PENDING",
         )
-        .values(status="SENDING")
+        .values(status="SENDING", claimed_at=datetime.utcnow())
     )
     session.commit()
     return (result.rowcount or 0) == 1
+
+
+# A claim older than this with the row still SENDING means the worker that held
+# it died mid-post (a real BC post finishes in seconds; the HTTP timeout is 30s).
+STALE_SENDING_SECONDS = 300
+
+
+def _reclaim_stale_sending(session: Session) -> int:
+    """Return orphaned SENDING rows to PENDING so their work resumes.
+
+    Only rows whose claim is older than STALE_SENDING_SECONDS (or has no claim
+    time at all — legacy rows) are reclaimed, so a post genuinely in flight in a
+    concurrent worker is never yanked out from under it. Even if a reclaim raced
+    a slow-but-live post, the ExternalRef anchor makes the eventual re-post a
+    no-op, so this can never double-post. Returns the number reclaimed."""
+    cutoff = datetime.utcnow() - timedelta(seconds=STALE_SENDING_SECONDS)
+    result = session.execute(
+        update(IntegrationOutbox)
+        .where(
+            IntegrationOutbox.target == OUTBOX_TARGET,
+            IntegrationOutbox.action.in_(OUTBOX_ACTIONS),
+            IntegrationOutbox.status == "SENDING",
+            or_(
+                IntegrationOutbox.claimed_at.is_(None),
+                IntegrationOutbox.claimed_at < cutoff,
+            ),
+        )
+        .values(status="PENDING")
+    )
+    session.commit()
+    reclaimed = result.rowcount or 0
+    if reclaimed:
+        log.warning("reclaimed %s stale SENDING outbox row(s) to PENDING", reclaimed)
+    return reclaimed
 
 
 def process_outbox(session: Session, *, max_attempts: int = MAX_ATTEMPTS) -> dict:
@@ -684,6 +719,8 @@ def process_outbox(session: Session, *, max_attempts: int = MAX_ATTEMPTS) -> dic
     Running this twice yields exactly one BC post + one ExternalRef per entity.
     """
     counts = {"posted": 0, "skipped": 0, "failed": 0}
+    # First, rescue any rows a crashed worker left stranded in SENDING.
+    _reclaim_stale_sending(session)
     rows = session.exec(
         select(IntegrationOutbox).where(
             IntegrationOutbox.target == OUTBOX_TARGET,
@@ -825,6 +862,21 @@ def _process_receipt_row(
         session.add(row)
         session.commit()
         return "skipped"
+
+    # Resolve the BC PO number NOW, not at enqueue time. A GRN can be enqueued
+    # before its PO's create_purchase_order row has drained (receive right after
+    # issue), which would freeze bc_po_no=None in the payload and make the live
+    # receipt post target no document. If the PO still has no BC crosswalk, defer
+    # this attempt (back to PENDING) until the PO posts — never post a receipt
+    # against a PO BC hasn't got yet.
+    ref = _bc_ref(session, po.id)
+    if ref is None:
+        _record_attempt_failure(
+            session, row, po.id,
+            "PO not yet posted to BC; deferring receipt", max_attempts,
+        )
+        return "failed"
+    payload["bc_po_no"] = ref.external_id
 
     try:
         bc_grn_no = bc.post_receipt(payload)
@@ -1060,6 +1112,57 @@ def issue_purchase_order(
     enqueue_po(session, po)
     if settings.outbox_process_on_issue:
         process_outbox(session)
+    session.refresh(po)
+    return _detail(session, po)
+
+
+# PO states a cancel is allowed from: not yet posted to BC and nothing received.
+# Once BC holds the posted order (ACKNOWLEDGED+) cancelling is a BC-side action,
+# and once goods are in it is a returns process — neither belongs to this app.
+PO_CANCELLABLE_STATES = {"DRAFT", "PO_ISSUED"}
+
+
+class CancelIn(BaseModel):
+    reason: Optional[str] = None
+
+
+@router.post("/purchase-orders/{po_id}/cancel")
+def cancel_purchase_order(
+    po_id: str,
+    body: CancelIn,
+    session: Session = Depends(get_session),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Cancel a PO that never made it to BC. This is the exit that stops a dead
+    order counting as in-transit forever: planning's OPEN_PO_STATES excludes
+    CANCELLED, so cancelling a mistaken/abandoned PO immediately frees its volume
+    for the next coverage run. Refused once BC holds the posted order (a
+    crosswalk exists) or anything has been received."""
+    _require_po_editor(user)
+    po = _get_po(session, po_id)
+    if po.status not in PO_CANCELLABLE_STATES:
+        raise _bad_transition(po.status, "cancel")
+    if _bc_ref(session, po.id) is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="PO is already posted to BC; cancel it in Business Central",
+        )
+    if _received_by_line(session, po.id):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="PO has receipts; cannot cancel",
+        )
+
+    prev = po.status
+    po.status = "CANCELLED"
+    session.add(po)
+    _record_event(
+        session,
+        entity_kind=ENTITY_KIND, entity_id=po.id,
+        from_status=prev, to_status="CANCELLED", event_type="CANCELLED",
+        actor=user.email, detail={"reason": body.reason} if body.reason else None,
+    )
+    session.commit()
     session.refresh(po)
     return _detail(session, po)
 
