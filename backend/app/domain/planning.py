@@ -53,9 +53,11 @@ from ..gateway.models import (
     StockSnapshot,
     UsageHistory,
     Vendor,
+    VendorPrice,
 )
 from . import requisitions as req_service
-from .bom_service import _cheapest_vendor_price, make_bom_of
+from .bom_service import make_bom_of
+from .purchasing import _choose_vendor_price
 
 router = APIRouter(prefix="/api", tags=["planning"])
 
@@ -321,6 +323,19 @@ def order_page(session: Session, today: Optional[date] = None) -> dict:
     vendors_by_id: dict[str, Vendor] = {
         v.id: v for v in session.exec(select(Vendor)).all()
     }
+    # Chosen vendor price per paper item in ONE query, not a SELECT per item.
+    # Group all prices for these items, then apply the SAME tie-break the Phase 3
+    # helper uses (cheapest, then lower lead time) so selection is unchanged.
+    prices_by_item: dict[str, list] = {}
+    if item_ids:
+        for vp in session.exec(
+            select(VendorPrice).where(VendorPrice.item_id.in_(item_ids))
+        ).all():
+            prices_by_item.setdefault(vp.item_id, []).append(vp)
+    chosen_vp = {
+        item_id: _choose_vendor_price(vps)
+        for item_id, vps in prices_by_item.items()
+    }
     for it in items:
         st = stock.get(it.id, {"on_hand": 0.0, "allocated": 0.0, "as_of": None})
         history_avg = engine.trailing_average(history.get(it.id, []))
@@ -335,7 +350,7 @@ def order_page(session: Session, today: Optional[date] = None) -> dict:
             monthly, st["allocated"], st["on_hand"], transit
         )
 
-        vp = _cheapest_vendor_price(session, it.id)
+        vp = chosen_vp.get(it.id)
         vendor = vendors_by_id.get(vp.vendor_id) if vp else None
         if requirement > 0:
             requirements_by_vendor.setdefault(

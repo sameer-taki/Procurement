@@ -57,33 +57,56 @@ class BCAdapter:
             return HttpNtlmAuth(self.user, self.password)
         return (self.user, self.password)
 
+    def _session(self):
+        """A short-lived requests.Session with the auth + TLS setting applied
+        once. NTLM authenticates the CONNECTION, not the request, so reusing one
+        keep-alive session across a paginated read (or a PO's header+lines) skips
+        a fresh 3-way NTLM handshake + TCP setup on every call — the difference
+        between one handshake and hundreds over a 5000-item master sync.
+
+        Scoped per top-level operation (each list_*/create_* opens and closes its
+        own) so it is never shared across threads — requests.Session is not safe
+        for concurrent use, and the scheduler + request threads share the adapter
+        singleton."""
+        import requests
+        s = requests.Session()
+        s.auth = self._auth()
+        s.verify = settings.bc_verify_tls
+        return s
+
     def _company_url(self) -> str:
         base = self.base_url.rstrip("/")
         return f"{base}/Company('{self.company}')" if self.company else base
 
-    def _get(self, url: str, params: Optional[dict] = None) -> dict:
+    def _get(self, url: str, params: Optional[dict] = None, session=None) -> dict:
         import requests
         p = {"$format": "json"}
         if params:
             p.update(params)
-        r = requests.get(url, auth=self._auth(), params=p,
-                         verify=settings.bc_verify_tls, timeout=30)
+        caller = session or requests
+        kwargs = {"params": p, "timeout": 30}
+        if session is None:                 # one-off call: auth + verify per request
+            kwargs["auth"] = self._auth()
+            kwargs["verify"] = settings.bc_verify_tls
+        r = caller.get(url, **kwargs)
         r.raise_for_status()
         return r.json()
 
     def _send(self, method: str, url: str, body: Optional[dict] = None,
-              if_match: Optional[str] = None) -> dict:
+              if_match: Optional[str] = None, session=None) -> dict:
         """POST/PATCH against BC. If-Match is required by BC for updates; '*'
         (last-writer-wins) is fine for the idempotent writes this adapter does."""
         import requests
         headers = {"Accept": "application/json"}
         if if_match:
             headers["If-Match"] = if_match
-        r = requests.request(
-            method, url, auth=self._auth(), json=body or {},
-            params={"$format": "json"}, headers=headers,
-            verify=settings.bc_verify_tls, timeout=30,
-        )
+        caller = session or requests
+        kwargs = {"json": body or {}, "params": {"$format": "json"},
+                  "headers": headers, "timeout": 30}
+        if session is None:
+            kwargs["auth"] = self._auth()
+            kwargs["verify"] = settings.bc_verify_tls
+        r = caller.request(method, url, **kwargs)
         r.raise_for_status()
         return r.json() if r.content else {}
 
@@ -175,10 +198,11 @@ class BCAdapter:
             return fakes.list_items()
         url = f"{self._company_url()}/{settings.bc_items_entity}"
         out: list[dict] = []
-        while url:
-            data = self._get(url)
-            out.extend(self._map_item(x) for x in data.get("value", []))
-            url = data.get("@odata.nextLink")
+        with self._session() as s:
+            while url:
+                data = self._get(url, session=s)
+                out.extend(self._map_item(x) for x in data.get("value", []))
+                url = data.get("@odata.nextLink")
         return out
 
     def get_item_price(self, sku: str) -> Optional[float]:
@@ -230,18 +254,19 @@ class BCAdapter:
             "$filter": f"({type_filter}) and Posting_Date ge {window_start}",
             "$select": "Item_No,Posting_Date,Quantity",
         }
-        while url:
-            data = self._get(url, params)
-            params = None          # nextLink already carries the query
-            for x in data.get("value", []):
-                sku = x.get("Item_No")
-                posted = str(x.get("Posting_Date") or "")
-                if not sku or len(posted) < 7:
-                    continue
-                period = posted[:7]
-                key = (sku, period)
-                by_item_month[key] = by_item_month.get(key, 0.0) + float(x.get("Quantity") or 0)
-            url = data.get("@odata.nextLink")
+        with self._session() as s:
+            while url:
+                data = self._get(url, params, session=s)
+                params = None          # nextLink already carries the query
+                for x in data.get("value", []):
+                    sku = x.get("Item_No")
+                    posted = str(x.get("Posting_Date") or "")
+                    if not sku or len(posted) < 7:
+                        continue
+                    period = posted[:7]
+                    key = (sku, period)
+                    by_item_month[key] = by_item_month.get(key, 0.0) + float(x.get("Quantity") or 0)
+                url = data.get("@odata.nextLink")
         # Net consumption is the negative of the signed sum; a month whose
         # corrections outweigh its consumption clamps to zero, never negative.
         return [
@@ -267,14 +292,15 @@ class BCAdapter:
         url = f"{self._company_url()}/{settings.bc_items_entity}"
         params = {"$select": f"{F_NO},{F_INVENTORY}"}
         out: dict = {}
-        while url:
-            data = self._get(url, params)
-            params = None          # nextLink already carries the query
-            for x in data.get("value", []):
-                no = x.get(F_NO)
-                if no:
-                    out[no] = float(x.get(F_INVENTORY) or 0)
-            url = data.get("@odata.nextLink")
+        with self._session() as s:
+            while url:
+                data = self._get(url, params, session=s)
+                params = None          # nextLink already carries the query
+                for x in data.get("value", []):
+                    no = x.get(F_NO)
+                    if no:
+                        out[no] = float(x.get(F_INVENTORY) or 0)
+                url = data.get("@odata.nextLink")
         return out
 
     def list_vendors(self) -> list[dict]:
@@ -285,18 +311,19 @@ class BCAdapter:
         url = f"{self._company_url()}/{settings.bc_vendors_entity}"
         out: list[dict] = []
         params = {"$select": f"{F_NO},{F_VENDOR_NAME},{F_VENDOR_EMAIL}"}
-        while url:
-            data = self._get(url, params)
-            params = None
-            for x in data.get("value", []):
-                no = x.get(F_NO)
-                if no:
-                    out.append({
-                        "bc_vendor_no": no,
-                        "name": x.get(F_VENDOR_NAME) or no,
-                        "email": x.get(F_VENDOR_EMAIL) or None,
-                    })
-            url = data.get("@odata.nextLink")
+        with self._session() as s:
+            while url:
+                data = self._get(url, params, session=s)
+                params = None
+                for x in data.get("value", []):
+                    no = x.get(F_NO)
+                    if no:
+                        out.append({
+                            "bc_vendor_no": no,
+                            "name": x.get(F_VENDOR_NAME) or no,
+                            "email": x.get(F_VENDOR_EMAIL) or None,
+                        })
+                url = data.get("@odata.nextLink")
         return out
 
     def get_vendor(self, vendor_no: str) -> Optional[dict]:
@@ -336,22 +363,23 @@ class BCAdapter:
         url = f"{self._company_url()}/{settings.bc_purchase_prices_entity}"
         out: list[dict] = []
         params = {"$select": f"{F_PP_ITEM},{F_PP_VENDOR},{F_PP_COST},{F_PP_MOQ}"}
-        while url:
-            data = self._get(url, params)
-            params = None
-            for x in data.get("value", []):
-                sku = x.get(F_PP_ITEM)
-                vendor_no = x.get(F_PP_VENDOR)
-                if not sku or not vendor_no:
-                    continue
-                out.append({
-                    "sku": sku,
-                    "vendor_no": vendor_no,
-                    "price": float(x.get(F_PP_COST) or 0),
-                    "moq": float(x.get(F_PP_MOQ)) if x.get(F_PP_MOQ) else None,
-                    "lead_time_days": None,
-                })
-            url = data.get("@odata.nextLink")
+        with self._session() as s:
+            while url:
+                data = self._get(url, params, session=s)
+                params = None
+                for x in data.get("value", []):
+                    sku = x.get(F_PP_ITEM)
+                    vendor_no = x.get(F_PP_VENDOR)
+                    if not sku or not vendor_no:
+                        continue
+                    out.append({
+                        "sku": sku,
+                        "vendor_no": vendor_no,
+                        "price": float(x.get(F_PP_COST) or 0),
+                        "moq": float(x.get(F_PP_MOQ)) if x.get(F_PP_MOQ) else None,
+                        "lead_time_days": None,
+                    })
+                url = data.get("@odata.nextLink")
         return out
 
     # WRITES

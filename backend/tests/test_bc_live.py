@@ -28,11 +28,11 @@ def live(monkeypatch):
     calls: list[dict] = []
     responses: dict[str, list] = {"get": [], "send": []}
 
-    def fake_get(url, params=None):
+    def fake_get(url, params=None, session=None):
         calls.append({"method": "get", "url": url, "params": params or {}})
         return responses["get"].pop(0) if responses["get"] else {"value": []}
 
-    def fake_send(method, url, body=None, if_match=None):
+    def fake_send(method, url, body=None, if_match=None, session=None):
         calls.append({"method": method, "url": url, "body": body or {},
                       "if_match": if_match})
         return responses["send"].pop(0) if responses["send"] else {}

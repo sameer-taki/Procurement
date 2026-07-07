@@ -50,8 +50,13 @@ def sync_items(session: Session) -> int:
     """Upsert the item master from BC (incl. cached price). Returns item count."""
     rows = bc.list_items()
     now = datetime.utcnow()
+    # One query for all existing items instead of a SELECT per SKU — at 5000+
+    # items the per-row lookup dominated the 30-min refresh loop.
+    existing = {
+        it.sku: it for it in session.exec(select(Item)).all()
+    }
     for r in rows:
-        item = session.exec(select(Item).where(Item.sku == r["sku"])).first()
+        item = existing.get(r["sku"])
         if item is None:
             item = Item(sku=r["sku"], name=r["name"], item_type=ItemType(r["item_type"]))
         item.name = r["name"]
