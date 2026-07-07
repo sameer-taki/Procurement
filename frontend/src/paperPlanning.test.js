@@ -9,6 +9,7 @@ import {
   canPlanPaper,
   canRecordShipment,
   coverBadge,
+  csvCell,
   fmtTonnes,
   latestAsOf,
   localMonthValue,
@@ -16,6 +17,8 @@ import {
   fmtVariance,
   monthLabel,
   nextArrival,
+  orderPageCsv,
+  parseForecastPaste,
   shipmentNextStatuses,
   shipmentStatusBadge,
 } from './paperPlanning.js'
@@ -304,5 +307,194 @@ describe('fmtVariance', () => {
   it('reads null as missing from BC', () => {
     expect(fmtVariance(null)).toBe('not in BC')
     expect(fmtVariance(undefined)).toBe('not in BC')
+  })
+})
+
+describe('parseForecastPaste', () => {
+  it('parses 3-column rows using the default customer', () => {
+    const { lines, skipped } = parseForecastPaste(
+      'CTN-FIJIWATER-1L\t2026-07\t42000\nCTN-FIJIWATER-500\t2026-08\t500',
+      'Fiji Water',
+    )
+    expect(lines).toEqual([
+      { customer: 'Fiji Water', sku: 'CTN-FIJIWATER-1L', period: '2026-07', qty_cartons: 42000 },
+      { customer: 'Fiji Water', sku: 'CTN-FIJIWATER-500', period: '2026-08', qty_cartons: 500 },
+    ])
+    expect(skipped).toBe(0)
+  })
+  it('parses 4-column rows with an explicit customer', () => {
+    const { lines } = parseForecastPaste('Pure Fiji\tCTN-1\t2026-07\t100', 'Someone Else')
+    expect(lines).toEqual([
+      { customer: 'Pure Fiji', sku: 'CTN-1', period: '2026-07', qty_cartons: 100 },
+    ])
+  })
+  it('falls back to the default customer when a 4-column customer cell is blank', () => {
+    const { lines } = parseForecastPaste('\tCTN-1\t2026-07\t100', 'Fiji Water')
+    expect(lines).toEqual([
+      { customer: 'Fiji Water', sku: 'CTN-1', period: '2026-07', qty_cartons: 100 },
+    ])
+  })
+  it('accepts tab, comma and semicolon separators in the same paste', () => {
+    const { lines, skipped } = parseForecastPaste(
+      'A;CTN-1;2026-07;10\nB,CTN-2,2026-08,20\nC\tCTN-3\t2026-09\t30',
+      '',
+    )
+    expect(lines.map((l) => [l.customer, l.sku, l.qty_cartons])).toEqual([
+      ['A', 'CTN-1', 10], ['B', 'CTN-2', 20], ['C', 'CTN-3', 30],
+    ])
+    expect(skipped).toBe(0)
+  })
+  it('handles Windows (CRLF) line endings', () => {
+    const { lines, skipped } = parseForecastPaste('CTN-1\t2026-07\t1\r\nCTN-2\t2026-08\t2', 'A')
+    expect(lines).toHaveLength(2)
+    expect(skipped).toBe(0)
+  })
+  it('normalizes every period variant to YYYY-MM', () => {
+    const { lines, skipped } = parseForecastPaste(
+      [
+        'CTN-1\t2026-07\t1', // YYYY-MM
+        'CTN-2\t7/2026\t1', // M/YYYY
+        'CTN-3\t07/2026\t1', // MM/YYYY
+        'CTN-4\t2026/07\t1', // YYYY/MM
+      ].join('\n'),
+      'A',
+    )
+    expect(lines.map((l) => l.period)).toEqual(['2026-07', '2026-07', '2026-07', '2026-07'])
+    expect(skipped).toBe(0)
+  })
+  it('skips header rows — the qty cell is not a finite number', () => {
+    const { lines, skipped } = parseForecastPaste(
+      'SKU\tMonth\tCartons\nCTN-1\t2026-07\t10',
+      'A',
+    )
+    expect(lines).toEqual([{ customer: 'A', sku: 'CTN-1', period: '2026-07', qty_cartons: 10 }])
+    expect(skipped).toBe(1)
+  })
+  it('ignores blank lines without counting them as skipped', () => {
+    const { lines, skipped } = parseForecastPaste('\n\nCTN-1\t2026-07\t10\n   \n', 'A')
+    expect(lines).toHaveLength(1)
+    expect(skipped).toBe(0)
+  })
+  it('skips garbage: bad/out-of-range periods, wrong column counts, missing customer', () => {
+    const { lines, skipped } = parseForecastPaste(
+      [
+        'CTN-1\tJuly 2026\t10', // unparseable period
+        'CTN-1\t2026-13\t10', // month out of range
+        'lonely-cell', // wrong shape (1 column)
+        'A\tB\tCTN-1\t2026-07\t10', // wrong shape (5 columns)
+        'CTN-2\t2026-07\t10', // 3 columns but no default customer
+      ].join('\n'),
+      '',
+    )
+    expect(lines).toEqual([])
+    expect(skipped).toBe(5)
+  })
+  it('skips negative and blank quantities but keeps zero', () => {
+    const { lines, skipped } = parseForecastPaste(
+      'CTN-1\t2026-07\t-5\nCTN-2\t2026-07\t\nCTN-3\t2026-07\t0',
+      'A',
+    )
+    expect(lines).toEqual([{ customer: 'A', sku: 'CTN-3', period: '2026-07', qty_cartons: 0 }])
+    expect(skipped).toBe(2)
+  })
+  it('trims cells (and the default customer)', () => {
+    const { lines } = parseForecastPaste(' CTN-1 , 2026-07 , 10 ', '  Fiji Water  ')
+    expect(lines).toEqual([{ customer: 'Fiji Water', sku: 'CTN-1', period: '2026-07', qty_cartons: 10 }])
+  })
+  it('is safe on empty/missing input', () => {
+    expect(parseForecastPaste('', 'A')).toEqual({ lines: [], skipped: 0 })
+    expect(parseForecastPaste(null, 'A')).toEqual({ lines: [], skipped: 0 })
+    expect(parseForecastPaste(undefined)).toEqual({ lines: [], skipped: 0 })
+  })
+})
+
+describe('csvCell', () => {
+  it('passes plain values through and blanks null/undefined', () => {
+    expect(csvCell('RF135')).toBe('RF135')
+    expect(csvCell(31474.5)).toBe('31474.5')
+    expect(csvCell(0)).toBe('0')
+    expect(csvCell(null)).toBe('')
+    expect(csvCell(undefined)).toBe('')
+  })
+  it('double-quotes cells containing commas, quotes or newlines (RFC 4180)', () => {
+    expect(csvCell('Visy, Ltd')).toBe('"Visy, Ltd"')
+    expect(csvCell('say "hi"')).toBe('"say ""hi"""')
+    expect(csvCell('a\nb')).toBe('"a\nb"')
+  })
+})
+
+describe('orderPageCsv', () => {
+  const page = {
+    window: ['2026-07', '2026-08', '2026-09'],
+    rows: [
+      {
+        sku: 'RF135-1000', grade: 'RF135', deckle_mm: 1000, basis: 'FORECAST',
+        forecast_periods: 3, monthly_usage: 10491.3, usage_3mo: 31474,
+        on_hand: 8000, allocated: 500, in_transit: 25000, next_eta: '2026-07-15',
+        months_of_stock: 0.7, requirement_kg: 12000, vendor: 'Visy, Ltd',
+        lead_time_days: 45, as_of: '2026-07-02T03:00:00',
+      },
+      {
+        sku: 'CWT140-1400', grade: null, deckle_mm: null, basis: 'NONE',
+        forecast_periods: 0, monthly_usage: null, usage_3mo: null,
+        on_hand: 3000, allocated: 0, in_transit: 0, next_eta: null,
+        months_of_stock: null, requirement_kg: 0, vendor: null,
+        lead_time_days: null, as_of: null,
+      },
+    ],
+    container_plans: [
+      {
+        vendor: 'Visy, Ltd', containers: 2, total_kg: 50000,
+        lines: [{ sku: 'RF135-1000', requirement_kg: 31474, order_kg: 50000 }],
+      },
+    ],
+  }
+
+  it('lays out the fixed header, one raw row per grade, then the container-plan section', () => {
+    const lines = orderPageCsv(page).split('\n')
+    expect(lines[0]).toBe(
+      'SKU,Grade,Deckle mm,Basis,Forecast periods,Monthly use kg,3-mo need kg,'
+      + 'On hand kg,Allocated kg,In transit kg,Next ETA,Months of stock,'
+      + 'Suggested order kg,Vendor,Lead time days,Stock as of',
+    )
+    expect(lines[1]).toBe(
+      'RF135-1000,RF135,1000,FORECAST,3,10491.3,31474,8000,500,25000,'
+      + '2026-07-15,0.7,12000,"Visy, Ltd",45,2026-07-02T03:00:00',
+    )
+    expect(lines[3]).toBe('') // blank line before the section
+    expect(lines[4]).toBe('Container plans')
+    expect(lines[5]).toBe('Vendor,Containers,Total kg')
+    expect(lines[6]).toBe('"Visy, Ltd",2,50000')
+    expect(lines[7]).toBe(' - RF135-1000,31474,50000')
+  })
+  it('renders null as an empty cell, keeping zero as 0', () => {
+    const lines = orderPageCsv(page).split('\n')
+    expect(lines[2]).toBe('CWT140-1400,,,NONE,0,,,3000,0,0,,,0,,,')
+  })
+  it('escapes cells containing commas or quotes', () => {
+    const csv = orderPageCsv({
+      rows: [{ ...page.rows[0], vendor: 'Say "cheese", twice' }],
+      container_plans: [],
+    })
+    expect(csv).toContain('"Say ""cheese"", twice"')
+  })
+  it('omits the container-plan section when nothing needs ordering', () => {
+    const csv = orderPageCsv({ rows: page.rows, container_plans: [] })
+    expect(csv).not.toContain('Container plans')
+    expect(csv.trimEnd().split('\n')).toHaveLength(3) // header + 2 rows only
+  })
+  it('an unpriced plan (vendor null) still lists its lines', () => {
+    const lines = orderPageCsv({
+      rows: [],
+      container_plans: [{
+        vendor: null, containers: 1, total_kg: 25000,
+        lines: [{ sku: 'TL125-1600', requirement_kg: 20000, order_kg: 25000 }],
+      }],
+    }).split('\n')
+    expect(lines[4]).toBe(',1,25000')
+    expect(lines[5]).toBe(' - TL125-1600,20000,25000')
+  })
+  it('is safe on an empty page — just the header', () => {
+    expect(orderPageCsv({}).trimEnd().split('\n')).toHaveLength(1)
   })
 })

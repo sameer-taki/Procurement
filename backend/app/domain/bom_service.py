@@ -251,7 +251,14 @@ def _bom_tree(session: Session, item: Item) -> Optional[dict]:
     components = _children(item.id, frozenset())
     if components is None:
         return None
-    return {"sku": item.sku, "name": item.name, "components": components}
+    header = _active_header(session, item.id)
+    return {
+        "sku": item.sku,
+        "name": item.name,
+        # Echoed so the spec editor can prefill (yield_qty=1.0 for carton specs).
+        "yield_qty": header.yield_qty if header else 1.0,
+        "components": components,
+    }
 
 
 # --------------------------------------------------------------------------- #

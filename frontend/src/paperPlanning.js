@@ -121,6 +121,58 @@ export function buildForecastPayload(rows = []) {
   return { lines }
 }
 
+// One month cell from a spreadsheet -> 'YYYY-MM'. Accepts 'YYYY-MM', 'YYYY/MM',
+// 'M/YYYY', 'MM/YYYY' (month 1..12); anything else is null.
+function normalizePeriod(cell) {
+  const s = String(cell ?? '').trim()
+  const ym = /^(\d{4})[-/](\d{1,2})$/.exec(s)
+  const my = /^(\d{1,2})[-/](\d{4})$/.exec(s)
+  let y
+  let m
+  if (ym) { y = ym[1]; m = ym[2] } else if (my) { m = my[1]; y = my[2] } else return null
+  const month = Number(m)
+  if (month < 1 || month > 12) return null
+  return `${y}-${String(month).padStart(2, '0')}`
+}
+
+// Paste-from-Excel -> forecast lines. Rows split on tab/comma/semicolon; accepts
+// 3 columns [sku, period, cartons] (customer = defaultCustomer) or 4 columns
+// [customer, sku, period, cartons] (a blank customer cell falls back to the
+// default, as merged customer cells paste blank). Blank lines are ignored
+// outright; every other row that can't import — headers (qty cell not a finite
+// number >= 0), bad periods, missing customer/sku, wrong column counts — counts
+// in `skipped`. Zero cartons is kept (it kills a forecast month).
+export function parseForecastPaste(text, defaultCustomer = '') {
+  const fallback = String(defaultCustomer ?? '').trim()
+  const lines = []
+  let skipped = 0
+  for (const raw of String(text ?? '').split(/\r?\n/)) {
+    if (!raw.trim()) continue
+    const cells = raw.split(/[\t,;]/).map((c) => c.trim())
+    let customer
+    let rest
+    if (cells.length === 3) {
+      customer = fallback
+      rest = cells
+    } else if (cells.length === 4) {
+      customer = cells[0] || fallback
+      rest = cells.slice(1)
+    } else {
+      skipped += 1
+      continue
+    }
+    const [sku, periodCell, qtyCell] = rest
+    const period = normalizePeriod(periodCell)
+    const qty = qtyCell === '' ? NaN : Number(qtyCell)
+    if (!customer || !sku || !period || !Number.isFinite(qty) || qty < 0) {
+      skipped += 1
+      continue
+    }
+    lines.push({ customer, sku, period, qty_cartons: qty })
+  }
+  return { lines, skipped }
+}
+
 // Earliest next arrival across order-page rows (next_eta is an ISO date, so
 // lexicographic sort is chronological). Null when nothing is inbound.
 export function nextArrival(rows = []) {
@@ -186,4 +238,46 @@ export function fmtVariance(kg) {
   if (kg == null || !Number.isFinite(n)) return 'not in BC'
   const sign = n > 0 ? '+' : n < 0 ? '−' : ''
   return `${sign}${Math.abs(n).toLocaleString(undefined, { maximumFractionDigits: 1 })} kg`
+}
+
+// RFC-4180 cell: null/undefined -> empty; a cell containing a comma, quote or
+// newline is double-quoted with internal quotes doubled. Numbers pass through
+// raw (no locale formatting) so the CSV re-imports cleanly.
+export function csvCell(v) {
+  if (v == null) return ''
+  const s = String(v)
+  return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
+}
+
+const ORDER_PAGE_HEADER = [
+  'SKU', 'Grade', 'Deckle mm', 'Basis', 'Forecast periods', 'Monthly use kg',
+  '3-mo need kg', 'On hand kg', 'Allocated kg', 'In transit kg', 'Next ETA',
+  'Months of stock', 'Suggested order kg', 'Vendor', 'Lead time days', 'Stock as of',
+]
+
+// GET /api/planning/order-page -> a CSV the manager can file like the old Visy
+// workbook: one row per grade under a fixed header, then (only when something
+// needs ordering) a blank line and a 'Container plans' section — each vendor's
+// FCL block followed by its ' - SKU' lines. Pure string shaping; the Blob /
+// download wiring stays in the page component (no DOM APIs here).
+export function orderPageCsv(page = {}) {
+  const out = [ORDER_PAGE_HEADER.join(',')]
+  for (const r of page.rows || []) {
+    out.push([
+      r.sku, r.grade, r.deckle_mm, r.basis, r.forecast_periods, r.monthly_usage,
+      r.usage_3mo, r.on_hand, r.allocated, r.in_transit, r.next_eta,
+      r.months_of_stock, r.requirement_kg, r.vendor, r.lead_time_days, r.as_of,
+    ].map(csvCell).join(','))
+  }
+  const plans = page.container_plans || []
+  if (plans.length > 0) {
+    out.push('', 'Container plans', ['Vendor', 'Containers', 'Total kg'].join(','))
+    for (const p of plans) {
+      out.push([p.vendor, p.containers, p.total_kg].map(csvCell).join(','))
+      for (const l of p.lines || []) {
+        out.push([` - ${l.sku}`, l.requirement_kg, l.order_kg].map(csvCell).join(','))
+      }
+    }
+  }
+  return `${out.join('\n')}\n`
 }

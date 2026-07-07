@@ -3,7 +3,9 @@ import { Link } from 'react-router-dom'
 import { api } from '../api.js'
 import { useAuth } from '../auth.jsx'
 import { num, relativeTime } from '../format.js'
-import { buildForecastPayload, canPlanPaper, localMonthValue, monthLabel } from '../paperPlanning.js'
+import {
+  buildForecastPayload, canPlanPaper, localMonthValue, monthLabel, parseForecastPaste,
+} from '../paperPlanning.js'
 
 // Customer carton forecasts — the FORECAST basis the Order Page explodes
 // through the BOMs into paper usage. Anyone can read; officer/admin upsert
@@ -52,6 +54,14 @@ export default function Forecasts() {
     load()
   }
 
+  function onImported(written, skipped) {
+    setNotice(
+      `${num(written)} forecast line${written === 1 ? '' : 's'} imported`
+      + `${skipped > 0 ? ` · ${num(skipped)} row${skipped === 1 ? '' : 's'} skipped` : ''}.`,
+    )
+    load()
+  }
+
   return (
     <div>
       <div className="page-head">
@@ -60,6 +70,7 @@ export default function Forecasts() {
       </div>
 
       {canPlan && <ForecastForm onSaved={onSaved} setUser={setUser} />}
+      {canPlan && <ImportCard onImported={onImported} setUser={setUser} />}
 
       <div className="filters">
         <input
@@ -251,6 +262,122 @@ function ForecastForm({ onSaved, setUser }) {
       <p className="muted small">
         Saving overwrites the same customer + SKU + month; a quantity of 0 keeps the line but kills
         the demand for that month.
+      </p>
+    </form>
+  )
+}
+
+// Paste-from-Excel bulk import: rows of [sku, month, cartons] (customer from the
+// box above) or [customer, sku, month, cartons], tab/comma/semicolon separated.
+// Parsing is pure (parseForecastPaste); the preview shows exactly what will be
+// written before the PUT, chunked under the backend's 1000-line cap.
+function ImportCard({ onImported, setUser }) {
+  const [defaultCustomer, setDefaultCustomer] = useState('')
+  const [text, setText] = useState('')
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  const parsed = parseForecastPaste(text, defaultCustomer)
+  const preview = parsed.lines.slice(0, 10)
+
+  async function save(e) {
+    e.preventDefault()
+    setError('')
+    if (parsed.lines.length === 0) { setError('Nothing to import — paste at least one valid row.'); return }
+    setBusy(true)
+    try {
+      let written = 0
+      for (let i = 0; i < parsed.lines.length; i += 1000) {
+        const chunk = parsed.lines.slice(i, i + 1000)
+        const res = await api.put('/api/forecasts', { lines: chunk })
+        written += res?.written ?? chunk.length
+      }
+      setText('')
+      onImported(written, parsed.skipped)
+    } catch (err) {
+      if (err.status === 401) setUser(null)
+      else setError(err.message) // 404 "unknown sku" surfaces as-is
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <form className="card" onSubmit={save}>
+      <h2>Import from spreadsheet</h2>
+      <div className="form-row">
+        <label className="field">
+          <span className="field-label">Default customer <span className="muted">(used for 3-column rows)</span></span>
+          <input
+            className="input"
+            style={{ width: 260 }}
+            value={defaultCustomer}
+            onChange={(e) => setDefaultCustomer(e.target.value)}
+            placeholder="e.g. Fiji Water"
+          />
+        </label>
+      </div>
+      <label className="field">
+        <span className="field-label">
+          Paste rows — sku, month, cartons <span className="muted">(or customer, sku, month, cartons)</span>
+        </span>
+        <textarea
+          className="input"
+          rows={6}
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          placeholder={'CTN-FIJIWATER-1L\t2026-07\t42000\nFiji Water\tCTN-FIJIWATER-500\t8/2026\t18000'}
+        />
+      </label>
+
+      {text.trim() !== '' && (
+        <>
+          <p className="muted small">
+            {num(parsed.lines.length)} line{parsed.lines.length === 1 ? '' : 's'} ready
+            {parsed.skipped > 0 && <> · {num(parsed.skipped)} row{parsed.skipped === 1 ? '' : 's'} skipped</>}
+          </p>
+          {preview.length > 0 && (
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Customer</th><th>SKU</th><th>Period</th><th className="r">Cartons</th>
+                </tr>
+              </thead>
+              <tbody>
+                {preview.map((l, i) => (
+                  <tr key={i}>
+                    <td>{l.customer}</td>
+                    <td>{l.sku}</td>
+                    <td className="nowrap">{monthLabel(l.period)}</td>
+                    <td className="r">{num(l.qty_cartons)}</td>
+                  </tr>
+                ))}
+                {parsed.lines.length > preview.length && (
+                  <tr>
+                    <td colSpan="4" className="muted center-cell">
+                      …and {num(parsed.lines.length - preview.length)} more
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          )}
+        </>
+      )}
+
+      {error && <div className="error">{error}</div>}
+
+      <div className="form-actions">
+        <button className="btn btn-primary" type="submit" disabled={busy || parsed.lines.length === 0}>
+          {busy
+            ? 'Saving…'
+            : `Save ${num(parsed.lines.length)} forecast${parsed.lines.length === 1 ? '' : 's'}`}
+        </button>
+      </div>
+      <p className="muted small">
+        Separators: tab, comma or semicolon. Months as 2026-07, 07/2026 or 2026/07. Rows whose
+        quantity is not a number (e.g. headers) are skipped; saving overwrites the same
+        customer + SKU + month.
       </p>
     </form>
   )

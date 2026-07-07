@@ -6,6 +6,7 @@ import { num, relativeTime } from '../format.js'
 import {
   basisLabel, belowCover, canCreateSuggestion, canPlanPaper, coverBadge,
   flaggedVariances, fmtTonnes, fmtVariance, latestAsOf, monthLabel, nextArrival,
+  orderPageCsv,
 } from '../paperPlanning.js'
 
 // The GML procurement SOP "Order Page": every paper grade with its usage basis
@@ -49,6 +50,22 @@ export default function PaperPlanning() {
     } finally {
       setBusy('')
     }
+  }
+
+  // Client-side download of the Order Page as CSV (the manager's old Excel
+  // workbook, one file per planning window). All the shaping lives in the pure
+  // orderPageCsv helper; this only wires the blob to a temporary anchor.
+  function exportCsv() {
+    const csv = orderPageCsv(data)
+    const blob = new Blob([csv], { type: 'text/csv' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `order-page-${(data.window || [])[0] || 'current'}.csv`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(url)
   }
 
   async function createRequisition() {
@@ -96,21 +113,24 @@ export default function PaperPlanning() {
             )}· stock as of {relativeTime(asOf)}
           </span>
         </div>
-        {canPlan && (
-          <div className="form-actions">
-            <button className="btn" onClick={importUsage} disabled={!!busy}>
-              {busy === 'import' ? 'Importing…' : 'Import usage from BC'}
-            </button>
-            <button
-              className="btn btn-primary"
-              onClick={createRequisition}
-              disabled={!!busy || !suggestGate.enabled}
-              title={suggestGate.reason || undefined}
-            >
-              {busy === 'suggest' ? 'Creating…' : 'Create suggested requisition'}
-            </button>
-          </div>
-        )}
+        <div className="form-actions">
+          <button className="btn" onClick={exportCsv}>Export CSV</button>
+          {canPlan && (
+            <>
+              <button className="btn" onClick={importUsage} disabled={!!busy}>
+                {busy === 'import' ? 'Importing…' : 'Import usage from BC'}
+              </button>
+              <button
+                className="btn btn-primary"
+                onClick={createRequisition}
+                disabled={!!busy || !suggestGate.enabled}
+                title={suggestGate.reason || undefined}
+              >
+                {busy === 'suggest' ? 'Creating…' : 'Create suggested requisition'}
+              </button>
+            </>
+          )}
+        </div>
       </div>
 
       {error && <div className="error">{error}</div>}

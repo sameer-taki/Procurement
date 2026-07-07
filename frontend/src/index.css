@@ -199,6 +199,7 @@ code { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; 
 }
 
 /* paper planning */
+textarea.input { font-family: inherit; resize: vertical; min-height: 96px; }
 .tiles.tiles-5 { grid-template-columns: repeat(5, 1fr); }
 @media (max-width: 820px) {
   .tiles.tiles-5 { grid-template-columns: repeat(2, 1fr); }
