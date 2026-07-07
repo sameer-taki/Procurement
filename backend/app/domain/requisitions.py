@@ -18,13 +18,15 @@ from datetime import date, datetime
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from ..auth.deps import CurrentUser, get_current_user
 from ..db import get_session
-from ..gateway.models import Item, OrderEvent, Requisition, RequisitionLine
+from ..gateway.models import (
+    Item, OrderEvent, PurchaseOrder, Requisition, RequisitionLine, VendorPrice,
+)
 from .approvals import APPROVER_ROLES, can_approve, required_tier
 
 router = APIRouter(prefix="/api", tags=["requisitions"])
@@ -43,22 +45,25 @@ CANCELLABLE = {"DRAFT", "SUBMITTED", "IN_APPROVAL"}
 # --------------------------------------------------------------------------- #
 class LineIn(BaseModel):
     sku: str
-    quantity: float
+    # Reject negative / zero / NaN / inf at the boundary: a non-finite qty would
+    # poison the estimated amount (NaN routing, inf overflow) and a <=0 qty is a
+    # meaningless requisition line. Mirrors the bom explode guard.
+    quantity: float = Field(gt=0, allow_inf_nan=False)
     needed_by: Optional[date] = None
 
 
 class RequisitionIn(BaseModel):
-    cost_center: Optional[str] = None
-    lines: list[LineIn]
+    cost_center: Optional[str] = Field(default=None, max_length=60)
+    lines: list[LineIn] = Field(min_length=1, max_length=500)
 
 
 class RequisitionUpdate(BaseModel):
-    cost_center: Optional[str] = None
-    lines: Optional[list[LineIn]] = None
+    cost_center: Optional[str] = Field(default=None, max_length=60)
+    lines: Optional[list[LineIn]] = Field(default=None, max_length=500)
 
 
 class RejectIn(BaseModel):
-    reason: str
+    reason: str = Field(max_length=1000)
 
 
 # --------------------------------------------------------------------------- #
@@ -101,12 +106,34 @@ def _lines_by_req(session: Session, req_ids: list[str]) -> dict[str, list[Requis
 
 
 def _price_map(session: Session, lines: list[RequisitionLine]) -> dict[str, float]:
-    """One SELECT over Item.id.in_(...) -> {item_id: sales_price or 0.0}."""
+    """{item_id: best unit-price estimate} for approval routing.
+
+    sales_price is BC's *sell* price and is null for purchased materials (paper
+    is bought, not sold) — using `sales_price or 0` alone made a 100-tonne paper
+    requisition estimate at FJD 0 and route to the lowest approval tier, i.e.
+    anyone could approve it. So fall back per item: sales_price, else the
+    cheapest vendor price (what we'd actually pay — the same signal PO creation
+    uses), else the rolled-up std_cost, else 0. Two batched queries, no N+1."""
     item_ids = {ln.item_id for ln in lines}
     if not item_ids:
         return {}
     items = session.exec(select(Item).where(Item.id.in_(item_ids))).all()
-    return {it.id: (it.sales_price or 0.0) for it in items}
+    # Cheapest vendor price per item, in one query.
+    cheapest: dict[str, float] = {}
+    for vp in session.exec(
+        select(VendorPrice).where(VendorPrice.item_id.in_(item_ids))
+    ).all():
+        if vp.item_id not in cheapest or vp.price < cheapest[vp.item_id]:
+            cheapest[vp.item_id] = vp.price
+    out: dict[str, float] = {}
+    for it in items:
+        if it.sales_price:
+            out[it.id] = it.sales_price
+        elif it.id in cheapest:
+            out[it.id] = cheapest[it.id]
+        else:
+            out[it.id] = it.std_cost or 0.0
+    return out
 
 
 def _item_for_sku(session: Session, sku: str) -> Item:
@@ -207,19 +234,22 @@ def _summary(req: Requisition, lines: list[RequisitionLine], amount: float) -> d
 
 def _detail(session: Session, req: Requisition) -> dict:
     lines = _lines(session, req.id)
-    # One query for all line prices; one amount computed once and reused below.
     items = {
         it.id: it
         for it in session.exec(
             select(Item).where(Item.id.in_({ln.item_id for ln in lines}))
         ).all()
     } if lines else {}
-    amount = sum(ln.quantity * ((items.get(ln.item_id).sales_price if items.get(ln.item_id) else None) or 0.0)
-                 for ln in lines)
+    # Use the SAME price basis approval routing does (sales_price, else vendor
+    # price, else std_cost) so the displayed estimate can never disagree with the
+    # tier a requisition actually routes to — otherwise a null-sales_price paper
+    # req would show FJD 0 here while routing off its real vendor cost.
+    prices = _price_map(session, lines)
+    amount = _amount_from(lines, prices)
     line_out = []
     for ln in lines:
         item = items.get(ln.item_id)
-        unit_price = (item.sales_price if item else None) or 0.0
+        unit_price = prices.get(ln.item_id, 0.0)
         line_out.append({
             "sku": item.sku if item else None,
             "name": item.name if item else None,
@@ -492,6 +522,14 @@ def reject_requisition(
     return _detail(session, req)
 
 
+def _existing_pos_for_req(session: Session, req_id: str) -> bool:
+    """True iff any PurchaseOrder was created from this requisition (used to gate
+    the APPROVED->CANCELLED exit; local to avoid importing purchasing)."""
+    return session.exec(
+        select(PurchaseOrder).where(PurchaseOrder.requisition_id == req_id)
+    ).first() is not None
+
+
 @router.post("/requisitions/{req_id}/cancel")
 def cancel_requisition(
     req_id: str,
@@ -500,7 +538,15 @@ def cancel_requisition(
 ):
     _require_editor(user)
     req = _get_req(session, req_id)
-    if req.status not in CANCELLABLE:
+    # An APPROVED requisition can still be cancelled IFF no PO has been created
+    # from it yet — otherwise it is a dead end: OPEN_REQ_STATES (planning) counts
+    # APPROVED as "in flight" and blocks the next coverage run, while create-po
+    # would be the only exit. Once POs exist, cancel the POs instead.
+    approved_no_pos = (
+        req.status == "APPROVED"
+        and not _existing_pos_for_req(session, req.id)
+    )
+    if req.status not in CANCELLABLE and not approved_no_pos:
         raise _bad_transition(req.status, "cancel")
     # Cancellation is the requester's own action (or ADMIN).
     if user.role_code != "ADMIN" and req.requester != user.email:

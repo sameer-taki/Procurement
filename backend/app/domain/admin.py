@@ -20,6 +20,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
+from sqlalchemy import func
 from sqlmodel import Session, select
 
 from ..auth.deps import CurrentUser, require_admin
@@ -158,6 +159,14 @@ def update_role(
     if role is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                             detail="Unknown role")
+    # ADMIN is the unlimited-approval escalation fallback (required_tier lands
+    # here for any amount). Capping it would leave large requisitions with no
+    # approver at all, so its limit is not editable.
+    if role.code == "ADMIN":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="The ADMIN role's approval limit is fixed at unlimited",
+        )
     before = role.approval_limit
     role.approval_limit = body.approval_limit
     session.add(role)
@@ -204,14 +213,24 @@ def system_health(
          "interval_seconds": settings.usage_import_seconds},
     ]
 
-    rows = session.exec(select(IntegrationOutbox)).all()
+    # Counts via GROUP BY, and only the displayed FAILED columns — never load
+    # every row's request_json payload just to tally 4 numbers + show 20 rows.
     counts = {"PENDING": 0, "SENDING": 0, "SENT": 0, "FAILED": 0}
-    for r in rows:
-        counts[r.status] = counts.get(r.status, 0) + 1
-    failed = sorted(
-        (r for r in rows if r.status == "FAILED"),
-        key=lambda r: r.created_at, reverse=True,
-    )[:FAILED_ROWS_SHOWN]
+    for st, n in session.exec(
+        select(IntegrationOutbox.status, func.count())
+        .group_by(IntegrationOutbox.status)
+    ).all():
+        counts[st] = counts.get(st, 0) + n
+    failed = session.exec(
+        select(
+            IntegrationOutbox.id, IntegrationOutbox.action,
+            IntegrationOutbox.entity_ref, IntegrationOutbox.attempts,
+            IntegrationOutbox.last_error, IntegrationOutbox.created_at,
+        )
+        .where(IntegrationOutbox.status == "FAILED")
+        .order_by(IntegrationOutbox.created_at.desc())
+        .limit(FAILED_ROWS_SHOWN)
+    ).all()
     return {
         "integrations": integrations,
         "schedulers": schedulers,
@@ -265,6 +284,7 @@ def retry_outbox_row(
         )
     row.status = "PENDING"
     row.attempts = 0
+    row.next_attempt_at = None      # clear any backoff so it retries immediately
     session.add(row)
     _audit(session, entity_kind=SYSTEM_ENTITY_KIND, entity_id=f"outbox:{row.id}",
            event_type="OUTBOX_RETRIED", actor=admin.email,

@@ -50,7 +50,8 @@ def BC_live(monkeypatch, pages, start_url):
     assert adapter.use_fakes is False
     monkeypatch.setattr(adapter, "_company_url", lambda: "")
     monkeypatch.setattr(settings, "bc_items_entity", start_url)  # first url == "u1"
-    monkeypatch.setattr(adapter, "_get", lambda url, params=None: pages[url.lstrip("/")])
+    monkeypatch.setattr(adapter, "_get",
+                        lambda url, params=None, session=None: pages[url.lstrip("/")])
     return adapter
 
 
@@ -64,7 +65,7 @@ def test_bc_usage_entries_live_filter_and_signed_netting(monkeypatch):
     * a month whose corrections outweigh usage clamps to zero."""
     captured = {}
 
-    def _get(url, params=None):
+    def _get(url, params=None, session=None):
         if params is not None:
             captured.update(params)
         return {"value": [

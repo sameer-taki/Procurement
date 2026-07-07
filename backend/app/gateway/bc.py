@@ -30,6 +30,14 @@ F_PP_COST = "Direct_Unit_Cost"
 F_PP_MOQ = "Minimum_Quantity"
 
 
+def _odata_str(value) -> str:
+    """Escape a value for an OData string literal: double any embedded single
+    quotes. A company name / item No / vendor No with an apostrophe (or a crafted
+    value) would otherwise break — or inject into — a $filter or a key predicate.
+    Callers still wrap the result in the surrounding quotes."""
+    return str(value or "").replace("'", "''")
+
+
 def _parse_dateformula_days(value) -> Optional[int]:
     """BC lead time is a dateformula string ('45D', '<2W>', '1M'); normalise to
     days. Unknown/blank shapes -> None (never guess a lead time)."""
@@ -57,33 +65,56 @@ class BCAdapter:
             return HttpNtlmAuth(self.user, self.password)
         return (self.user, self.password)
 
+    def _session(self):
+        """A short-lived requests.Session with the auth + TLS setting applied
+        once. NTLM authenticates the CONNECTION, not the request, so reusing one
+        keep-alive session across a paginated read (or a PO's header+lines) skips
+        a fresh 3-way NTLM handshake + TCP setup on every call — the difference
+        between one handshake and hundreds over a 5000-item master sync.
+
+        Scoped per top-level operation (each list_*/create_* opens and closes its
+        own) so it is never shared across threads — requests.Session is not safe
+        for concurrent use, and the scheduler + request threads share the adapter
+        singleton."""
+        import requests
+        s = requests.Session()
+        s.auth = self._auth()
+        s.verify = settings.bc_verify_tls
+        return s
+
     def _company_url(self) -> str:
         base = self.base_url.rstrip("/")
-        return f"{base}/Company('{self.company}')" if self.company else base
+        return f"{base}/Company('{_odata_str(self.company)}')" if self.company else base
 
-    def _get(self, url: str, params: Optional[dict] = None) -> dict:
+    def _get(self, url: str, params: Optional[dict] = None, session=None) -> dict:
         import requests
         p = {"$format": "json"}
         if params:
             p.update(params)
-        r = requests.get(url, auth=self._auth(), params=p,
-                         verify=settings.bc_verify_tls, timeout=30)
+        caller = session or requests
+        kwargs = {"params": p, "timeout": 30}
+        if session is None:                 # one-off call: auth + verify per request
+            kwargs["auth"] = self._auth()
+            kwargs["verify"] = settings.bc_verify_tls
+        r = caller.get(url, **kwargs)
         r.raise_for_status()
         return r.json()
 
     def _send(self, method: str, url: str, body: Optional[dict] = None,
-              if_match: Optional[str] = None) -> dict:
+              if_match: Optional[str] = None, session=None) -> dict:
         """POST/PATCH against BC. If-Match is required by BC for updates; '*'
         (last-writer-wins) is fine for the idempotent writes this adapter does."""
         import requests
         headers = {"Accept": "application/json"}
         if if_match:
             headers["If-Match"] = if_match
-        r = requests.request(
-            method, url, auth=self._auth(), json=body or {},
-            params={"$format": "json"}, headers=headers,
-            verify=settings.bc_verify_tls, timeout=30,
-        )
+        caller = session or requests
+        kwargs = {"json": body or {}, "params": {"$format": "json"},
+                  "headers": headers, "timeout": 30}
+        if session is None:
+            kwargs["auth"] = self._auth()
+            kwargs["verify"] = settings.bc_verify_tls
+        r = caller.request(method, url, **kwargs)
         r.raise_for_status()
         return r.json() if r.content else {}
 
@@ -175,17 +206,18 @@ class BCAdapter:
             return fakes.list_items()
         url = f"{self._company_url()}/{settings.bc_items_entity}"
         out: list[dict] = []
-        while url:
-            data = self._get(url)
-            out.extend(self._map_item(x) for x in data.get("value", []))
-            url = data.get("@odata.nextLink")
+        with self._session() as s:
+            while url:
+                data = self._get(url, session=s)
+                out.extend(self._map_item(x) for x in data.get("value", []))
+                url = data.get("@odata.nextLink")
         return out
 
     def get_item_price(self, sku: str) -> Optional[float]:
         """Unit price for one SKU (BC item No). Demo data until BC is wired."""
         if self.use_fakes:
             return fakes.item_price(sku)
-        url = f"{self._company_url()}/{settings.bc_items_entity}('{sku}')"
+        url = f"{self._company_url()}/{settings.bc_items_entity}('{_odata_str(sku)}')"
         try:
             return self._get(url, {"$select": F_PRICE}).get(F_PRICE)
         except Exception:
@@ -223,25 +255,26 @@ class BCAdapter:
         entry_types = [
             t.strip() for t in settings.bc_usage_entry_types.split(",") if t.strip()
         ]
-        type_filter = " or ".join(f"Entry_Type eq '{t}'" for t in entry_types)
+        type_filter = " or ".join(f"Entry_Type eq '{_odata_str(t)}'" for t in entry_types)
         url = f"{self._company_url()}/{settings.bc_usage_entity}"
         by_item_month: dict[tuple, float] = {}
         params = {
             "$filter": f"({type_filter}) and Posting_Date ge {window_start}",
             "$select": "Item_No,Posting_Date,Quantity",
         }
-        while url:
-            data = self._get(url, params)
-            params = None          # nextLink already carries the query
-            for x in data.get("value", []):
-                sku = x.get("Item_No")
-                posted = str(x.get("Posting_Date") or "")
-                if not sku or len(posted) < 7:
-                    continue
-                period = posted[:7]
-                key = (sku, period)
-                by_item_month[key] = by_item_month.get(key, 0.0) + float(x.get("Quantity") or 0)
-            url = data.get("@odata.nextLink")
+        with self._session() as s:
+            while url:
+                data = self._get(url, params, session=s)
+                params = None          # nextLink already carries the query
+                for x in data.get("value", []):
+                    sku = x.get("Item_No")
+                    posted = str(x.get("Posting_Date") or "")
+                    if not sku or len(posted) < 7:
+                        continue
+                    period = posted[:7]
+                    key = (sku, period)
+                    by_item_month[key] = by_item_month.get(key, 0.0) + float(x.get("Quantity") or 0)
+                url = data.get("@odata.nextLink")
         # Net consumption is the negative of the signed sum; a month whose
         # corrections outweigh its consumption clamps to zero, never negative.
         return [
@@ -267,14 +300,15 @@ class BCAdapter:
         url = f"{self._company_url()}/{settings.bc_items_entity}"
         params = {"$select": f"{F_NO},{F_INVENTORY}"}
         out: dict = {}
-        while url:
-            data = self._get(url, params)
-            params = None          # nextLink already carries the query
-            for x in data.get("value", []):
-                no = x.get(F_NO)
-                if no:
-                    out[no] = float(x.get(F_INVENTORY) or 0)
-            url = data.get("@odata.nextLink")
+        with self._session() as s:
+            while url:
+                data = self._get(url, params, session=s)
+                params = None          # nextLink already carries the query
+                for x in data.get("value", []):
+                    no = x.get(F_NO)
+                    if no:
+                        out[no] = float(x.get(F_INVENTORY) or 0)
+                url = data.get("@odata.nextLink")
         return out
 
     def list_vendors(self) -> list[dict]:
@@ -285,18 +319,19 @@ class BCAdapter:
         url = f"{self._company_url()}/{settings.bc_vendors_entity}"
         out: list[dict] = []
         params = {"$select": f"{F_NO},{F_VENDOR_NAME},{F_VENDOR_EMAIL}"}
-        while url:
-            data = self._get(url, params)
-            params = None
-            for x in data.get("value", []):
-                no = x.get(F_NO)
-                if no:
-                    out.append({
-                        "bc_vendor_no": no,
-                        "name": x.get(F_VENDOR_NAME) or no,
-                        "email": x.get(F_VENDOR_EMAIL) or None,
-                    })
-            url = data.get("@odata.nextLink")
+        with self._session() as s:
+            while url:
+                data = self._get(url, params, session=s)
+                params = None
+                for x in data.get("value", []):
+                    no = x.get(F_NO)
+                    if no:
+                        out.append({
+                            "bc_vendor_no": no,
+                            "name": x.get(F_VENDOR_NAME) or no,
+                            "email": x.get(F_VENDOR_EMAIL) or None,
+                        })
+                url = data.get("@odata.nextLink")
         return out
 
     def get_vendor(self, vendor_no: str) -> Optional[dict]:
@@ -306,7 +341,7 @@ class BCAdapter:
                 if v.get("bc_vendor_no") == vendor_no:
                     return dict(v)
             return None
-        url = f"{self._company_url()}/{settings.bc_vendors_entity}('{vendor_no}')"
+        url = f"{self._company_url()}/{settings.bc_vendors_entity}('{_odata_str(vendor_no)}')"
         try:
             x = self._get(url, {"$select": f"{F_NO},{F_VENDOR_NAME},{F_VENDOR_EMAIL}"})
         except Exception:
@@ -336,22 +371,27 @@ class BCAdapter:
         url = f"{self._company_url()}/{settings.bc_purchase_prices_entity}"
         out: list[dict] = []
         params = {"$select": f"{F_PP_ITEM},{F_PP_VENDOR},{F_PP_COST},{F_PP_MOQ}"}
-        while url:
-            data = self._get(url, params)
-            params = None
-            for x in data.get("value", []):
-                sku = x.get(F_PP_ITEM)
-                vendor_no = x.get(F_PP_VENDOR)
-                if not sku or not vendor_no:
-                    continue
-                out.append({
-                    "sku": sku,
-                    "vendor_no": vendor_no,
-                    "price": float(x.get(F_PP_COST) or 0),
-                    "moq": float(x.get(F_PP_MOQ)) if x.get(F_PP_MOQ) else None,
-                    "lead_time_days": None,
-                })
-            url = data.get("@odata.nextLink")
+        with self._session() as s:
+            while url:
+                data = self._get(url, params, session=s)
+                params = None
+                for x in data.get("value", []):
+                    sku = x.get(F_PP_ITEM)
+                    vendor_no = x.get(F_PP_VENDOR)
+                    price = float(x.get(F_PP_COST) or 0)
+                    # A missing/zero Direct_Unit_Cost means 'not set' in BC (same
+                    # convention as reorder point). Skip it — a synced 0.0 would
+                    # win cheapest-vendor selection and post a free-of-charge PO.
+                    if not sku or not vendor_no or price <= 0:
+                        continue
+                    out.append({
+                        "sku": sku,
+                        "vendor_no": vendor_no,
+                        "price": price,
+                        "moq": float(x.get(F_PP_MOQ)) if x.get(F_PP_MOQ) else None,
+                        "lead_time_days": None,
+                    })
+                url = data.get("@odata.nextLink")
         return out
 
     # WRITES
@@ -360,40 +400,55 @@ class BCAdapter:
         (External_Document_No carries it) — the retry-safety lookup."""
         url = f"{self._company_url()}/{settings.bc_po_entity}"
         data = self._get(url, {
-            "$filter": f"External_Document_No eq '{number}'",
+            "$filter": f"External_Document_No eq '{_odata_str(number)}'",
             "$select": F_NO, "$top": "1",
         })
         values = data.get("value") or []
         return values[0].get(F_NO) if values else None
 
-    def _existing_line_count(self, bc_po_no: str) -> int:
+    def _existing_line_items(self, bc_po_no: str) -> tuple[set, int]:
+        """(item Nos already on the BC order, highest Line_No) — the retry-safety
+        read that lets us post only the lines a previous attempt didn't."""
         url = f"{self._company_url()}/{settings.bc_po_lines_entity}"
         data = self._get(url, {
-            "$filter": f"Document_No eq '{bc_po_no}'", "$select": "Line_No",
+            "$filter": f"Document_No eq '{_odata_str(bc_po_no)}'",
+            "$select": f"Line_No,{F_NO}",
         })
-        return len(data.get("value") or [])
+        items: set = set()
+        max_line = 0
+        for x in data.get("value") or []:
+            if x.get(F_NO):
+                items.add(x.get(F_NO))
+            max_line = max(max_line, int(x.get("Line_No") or 0))
+        return items, max_line
 
     def post_purchase_order_lines(self, bc_po_no: str, lines: list[dict]) -> int:
-        """Post the order's lines, unless the document already has lines (a
-        retried create landed here before) — returns how many were written.
-        Standard page fields: Document_Type/Document_No/Line_No/Type/No/
-        Quantity/Direct_Unit_Cost; Line_No steps by 10000 as BC does."""
+        """Post the order's lines, skipping ONLY the items already on the document
+        so a retry after a partial post completes the missing lines instead of
+        dropping them. Returns how many were written. Standard page fields:
+        Document_Type/Document_No/Line_No/Type/No/Quantity/Direct_Unit_Cost;
+        Line_No continues in steps of 10000 past the highest existing line."""
         if self.use_fakes:
             return 0
-        if self._existing_line_count(bc_po_no) > 0:
-            return 0
+        existing_items, max_line = self._existing_line_items(bc_po_no)
         url = f"{self._company_url()}/{settings.bc_po_lines_entity}"
         written = 0
-        for i, ln in enumerate(lines):
+        next_line = max_line
+        for ln in lines:
+            item_no = ln.get("bc_item_no") or ln.get("sku")
+            if item_no in existing_items:
+                continue                    # already posted by a prior attempt
+            next_line += 10000
             self._send("post", url, {
                 "Document_Type": "Order",
                 "Document_No": bc_po_no,
-                "Line_No": (i + 1) * 10000,
+                "Line_No": next_line,
                 "Type": "Item",
-                "No": ln.get("bc_item_no") or ln.get("sku"),
+                "No": item_no,
                 "Quantity": ln.get("quantity"),
                 "Direct_Unit_Cost": ln.get("unit_price"),
             })
+            existing_items.add(item_no)
             written += 1
         return written
 
@@ -447,6 +502,14 @@ class BCAdapter:
         Step 4 is best-effort: once step 3 succeeds the receipt EXISTS in BC, so a
         lookup hiccup falls back to a deterministic reference rather than raising
         (raising would retry the whole post and double-receive).
+
+        RESIDUAL RISK (confirm before enabling live receipt writes): if the step-3
+        Post action itself times out with no response, the receipt may or may not
+        have posted, and a retry re-runs steps 2-3 -> a possible DOUBLE receive.
+        Making this leg exactly-once needs a tenant-specific correlation key (e.g.
+        stamping the grn_no where the posted receipt is queryable), which must be
+        verified against the real BC first. Until then, run receipt posting with a
+        read-only BC account or reconcile posted receipts manually (CLAUDE.md §7).
         """
         if self.use_fakes:
             import hashlib
@@ -463,7 +526,7 @@ class BCAdapter:
         # 1. Item No -> Line_No on the BC order.
         lines_url = f"{self._company_url()}/{settings.bc_po_lines_entity}"
         data = self._get(lines_url, {
-            "$filter": f"Document_No eq '{bc_po_no}'",
+            "$filter": f"Document_No eq '{_odata_str(bc_po_no)}'",
             "$select": f"Line_No,{F_NO}",
         })
         line_no_by_item = {x.get(F_NO): x.get("Line_No") for x in data.get("value", [])}
@@ -485,7 +548,7 @@ class BCAdapter:
                 )
             self._send(
                 "patch",
-                f"{lines_url}(Document_Type='Order',Document_No='{bc_po_no}',Line_No={line_no})",
+                f"{lines_url}(Document_Type='Order',Document_No='{_odata_str(bc_po_no)}',Line_No={line_no})",
                 {"Qty_to_Receive": qty},
                 if_match="*",
             )
@@ -493,13 +556,13 @@ class BCAdapter:
         # 3. Post the receive.
         self._send(
             "post",
-            f"{self._company_url()}/{settings.bc_po_entity}('{bc_po_no}')/{settings.bc_receipt_post_action}",
+            f"{self._company_url()}/{settings.bc_po_entity}('{_odata_str(bc_po_no)}')/{settings.bc_receipt_post_action}",
         )
 
         # 4. The posted receipt's number (best-effort; see docstring).
         try:
             data = self._get(f"{self._company_url()}/{settings.bc_receipt_entity}", {
-                "$filter": f"Order_No eq '{bc_po_no}'",
+                "$filter": f"Order_No eq '{_odata_str(bc_po_no)}'",
                 "$select": F_NO, "$orderby": f"{F_NO} desc", "$top": "1",
             })
             values = data.get("value") or []
@@ -527,7 +590,7 @@ class BCAdapter:
         if not bc_po_no:
             return "PENDING_INVOICE"
         data = self._get(f"{self._company_url()}/{settings.bc_invoice_entity}", {
-            "$filter": f"Order_No eq '{bc_po_no}'",
+            "$filter": f"Order_No eq '{_odata_str(bc_po_no)}'",
             "$select": F_NO, "$top": "1",
         })
         return "MATCHED" if data.get("value") else "PENDING_INVOICE"

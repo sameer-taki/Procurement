@@ -135,7 +135,8 @@ function normalizePeriod(cell) {
   return `${y}-${String(month).padStart(2, '0')}`
 }
 
-// Paste-from-Excel -> forecast lines. Rows split on tab/comma/semicolon; accepts
+// Paste-from-Excel -> forecast lines. A tabbed row (Excel copy-paste) splits on
+// tabs only; a manual paste with no tab falls back to comma/semicolon. Accepts
 // 3 columns [sku, period, cartons] (customer = defaultCustomer) or 4 columns
 // [customer, sku, period, cartons] (a blank customer cell falls back to the
 // default, as merged customer cells paste blank). Blank lines are ignored
@@ -148,7 +149,12 @@ export function parseForecastPaste(text, defaultCustomer = '') {
   let skipped = 0
   for (const raw of String(text ?? '').split(/\r?\n/)) {
     if (!raw.trim()) continue
-    const cells = raw.split(/[\t,;]/).map((c) => c.trim())
+    // Excel copy-paste is tab-delimited: split a tabbed row on tabs ONLY so a
+    // comma-bearing customer name ("Visy, Ltd") and a thousands-separated
+    // quantity ("42,000") stay in one cell. Only a manual (no-tab) paste falls
+    // back to comma/semicolon.
+    const tabbed = raw.includes('\t')
+    const cells = (tabbed ? raw.split('\t') : raw.split(/[,;]/)).map((c) => c.trim())
     let customer
     let rest
     if (cells.length === 3) {
@@ -163,7 +169,10 @@ export function parseForecastPaste(text, defaultCustomer = '') {
     }
     const [sku, periodCell, qtyCell] = rest
     const period = normalizePeriod(periodCell)
-    const qty = qtyCell === '' ? NaN : Number(qtyCell)
+    // Tab-split rows can carry thousands separators ("42,000"); strip them
+    // before Number(). Comma/semicolon rows can't (a comma is a delimiter).
+    const qtyClean = tabbed ? qtyCell.replace(/,/g, '') : qtyCell
+    const qty = qtyClean === '' ? NaN : Number(qtyClean)
     if (!customer || !sku || !period || !Number.isFinite(qty) || qty < 0) {
       skipped += 1
       continue
@@ -245,7 +254,16 @@ export function fmtVariance(kg) {
 // raw (no locale formatting) so the CSV re-imports cleanly.
 export function csvCell(v) {
   if (v == null) return ''
-  const s = String(v)
+  // Numbers pass through untouched so exports re-import cleanly (a negative
+  // figure must stay a number, not become quoted text).
+  let s = String(v)
+  if (typeof v !== 'number' && s && '=+-@\t\r'.includes(s[0])) {
+    // Neutralise spreadsheet formula injection: a TEXT cell starting with
+    // = + - @ (or a leading tab/CR Excel trims before them) runs as a formula
+    // on open, and vendor/SKU/grade strings originate from BC. Prefix a quote
+    // so it stays literal text.
+    s = `'${s}`
+  }
   return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
 }
 

@@ -19,11 +19,19 @@ def _connect_args(url: str) -> dict:
     return {"check_same_thread": False} if url.startswith("sqlite") else {}
 
 
-engine = create_engine(
-    settings.database_url,
-    connect_args=_connect_args(settings.database_url),
-    pool_pre_ping=True,
-)
+def _engine_kwargs(url: str) -> dict:
+    kwargs = {"connect_args": _connect_args(url), "pool_pre_ping": True}
+    # Only size a pool for a real server DB (SQLite tests/dev use their own
+    # pooling). Sized from settings so a busy host — up to 40 request threads
+    # plus 3 scheduler threads — doesn't starve on the SQLAlchemy default 5+10.
+    if not url.startswith("sqlite"):
+        kwargs["pool_size"] = settings.db_pool_size
+        kwargs["max_overflow"] = settings.db_max_overflow
+        kwargs["pool_recycle"] = 1800
+    return kwargs
+
+
+engine = create_engine(settings.database_url, **_engine_kwargs(settings.database_url))
 
 
 def get_session() -> Iterator[Session]:

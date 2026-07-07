@@ -28,11 +28,11 @@ def live(monkeypatch):
     calls: list[dict] = []
     responses: dict[str, list] = {"get": [], "send": []}
 
-    def fake_get(url, params=None):
+    def fake_get(url, params=None, session=None):
         calls.append({"method": "get", "url": url, "params": params or {}})
         return responses["get"].pop(0) if responses["get"] else {"value": []}
 
-    def fake_send(method, url, body=None, if_match=None):
+    def fake_send(method, url, body=None, if_match=None, session=None):
         calls.append({"method": method, "url": url, "body": body or {},
                       "if_match": if_match})
         return responses["send"].pop(0) if responses["send"] else {}
@@ -150,9 +150,14 @@ def test_create_po_posts_header_then_lines(live):
 
 
 def test_create_po_retry_reuses_existing_header_and_lines(live):
+    # A full retry: the header exists AND both items are already on it (keyed by
+    # item No, which is how BC returns lines and how reconciliation matches).
     live._test_responses["get"] = [
         {"value": [{"No": "106001"}]},                    # header already exists
-        {"value": [{"Line_No": 10000}, {"Line_No": 20000}]},  # lines already posted
+        {"value": [
+            {"Line_No": 10000, "No": "CWT140-1400"},
+            {"Line_No": 20000, "No": "RF135-1000"},
+        ]},                                               # both items already posted
     ]
     assert live.create_purchase_order(PO_PAYLOAD) == "106001"
     assert [c for c in live._test_calls if c["method"] == "post"] == []
@@ -166,6 +171,21 @@ def test_create_po_retry_completes_missing_lines(live):
     assert live.create_purchase_order(PO_PAYLOAD) == "106001"
     posts = [c for c in live._test_calls if c["method"] == "post"]
     assert len(posts) == 2               # just the two lines, no second header
+
+
+def test_create_po_retry_completes_only_the_missing_line(live):
+    # Partial retry: one item landed before the crash, one didn't. Reconcile by
+    # item No -> post ONLY the missing line, at a Line_No past the existing max
+    # (this is the finding-#14 fix: don't drop lines a prior attempt missed).
+    live._test_responses["get"] = [
+        {"value": [{"No": "106001"}]},
+        {"value": [{"Line_No": 10000, "No": "CWT140-1400"}]},   # only the first item
+    ]
+    assert live.create_purchase_order(PO_PAYLOAD) == "106001"
+    posts = [c for c in live._test_calls if c["method"] == "post"]
+    assert len(posts) == 1
+    assert posts[0]["body"]["No"] == "RF135-1000"
+    assert posts[0]["body"]["Line_No"] == 20000        # max existing (10000) + 10000
 
 
 def test_create_po_raises_when_bc_returns_no_number(live):
@@ -284,3 +304,45 @@ def test_demo_vendor_prices_carry_vendor_no():
     assert all("vendor_no" in r and "sku" in r for r in rows)
     visy = [r for r in rows if r["vendor_no"] == "V-2001"]
     assert visy, "demo Visy Board prices should map to V-2001"
+
+
+def test_list_vendor_prices_skips_zero_cost(live):
+    """A missing/<=0 Direct_Unit_Cost is 'not set' in BC — dropped so a synced
+    0.0 can't win cheapest-vendor selection and post a free PO."""
+    live._test_responses["get"] = [{"value": [
+        {"Item_No": "A", "Vendor_No": "V1", "Direct_Unit_Cost": 0},
+        {"Item_No": "B", "Vendor_No": "V1", "Direct_Unit_Cost": None},
+        {"Item_No": "C", "Vendor_No": "V1", "Direct_Unit_Cost": 1.5},
+    ]}]
+    out = live.list_vendor_prices()
+    assert [r["sku"] for r in out] == ["C"]
+
+
+def test_get_inventory_walks_pages_and_coerces(live):
+    """get_inventory paginates and coerces blank/missing Inventory to 0, skipping
+    rows with no item No (a silent-zero mapping bug here would flood the
+    reconciliation view with false variances)."""
+    live._test_responses["get"] = [
+        {"value": [{"No": "WTL175", "Inventory": 40000},
+                   {"No": "BX186", "Inventory": None}],
+         "@odata.nextLink": "page2"},
+        {"value": [{"No": "", "Inventory": 999},          # no No -> skipped
+                   {"No": "RF135", "Inventory": 12000}]},
+    ]
+    inv = live.get_inventory()
+    assert inv == {"WTL175": 40000.0, "BX186": 0.0, "RF135": 12000.0}
+
+
+def test_odata_str_escapes_single_quotes():
+    from app.gateway.bc import _odata_str
+    assert _odata_str("O'Brien Papers") == "O''Brien Papers"
+    assert _odata_str("Golden Manufacturers Pte Ltd") == "Golden Manufacturers Pte Ltd"
+    assert _odata_str(None) == ""
+
+
+def test_company_url_escapes_apostrophe(monkeypatch):
+    from app.config import settings
+    from app.gateway.bc import BCAdapter
+    monkeypatch.setattr(settings, "bc_base_url", "http://bc/ODataV4")
+    monkeypatch.setattr(settings, "bc_company", "O'Brien Co")
+    assert BCAdapter()._company_url() == "http://bc/ODataV4/Company('O''Brien Co')"

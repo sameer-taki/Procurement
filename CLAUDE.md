@@ -124,7 +124,9 @@ Work one phase at a time; open a PR per phase; keep CI green. Each phase has a D
 - **DoD:** approving a req posts a real PO to BC and emails the vendor; failures retry, never double-post.
 
 ### Phase 4 — BOM + explosion service  *(the order→procurement bridge)*
-- Item/BOM CRUD; mirror Kiwiplan/Accura material BOMs read-only (structure), keep the kit level in-app.
+- BOM CRUD (the board-grade spec, versioned + APP-owned only — `PUT/DELETE /api/items/{sku}/bom`);
+  mirror Kiwiplan/Accura material BOMs read-only (structure), keep the kit level in-app.
+  (Item master itself is owned by BC and synced, not created in-app — there is no item-CRUD endpoint.)
 - Wire `bom.explode_and_net()` to the DB: `bom_of` from `bom_headers`/`bom_lines`, `stock` from
   `stock_snapshots`, `moq` from `vendor_prices`. On confirmed demand, emit **suggested requisitions**
   (status DRAFT, source=demand) for shortages.

@@ -280,6 +280,15 @@ class IntegrationOutbox(SQLModel, table=True):
     attempts: int = 0
     last_error: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
+    # Set when a worker claims the row (PENDING->SENDING). A row still SENDING
+    # long after its claim was orphaned by a crash/redeploy mid-post; the
+    # processor reclaims it to PENDING so the work resumes (double-posting is
+    # still impossible — the ExternalRef anchor makes a re-post a no-op).
+    claimed_at: Optional[datetime] = None
+    # Earliest time a failed row may be retried. Exponential backoff writes this
+    # so a multi-hour BC outage no longer burns all attempts in ~5 minutes; the
+    # processor skips rows whose next_attempt_at is still in the future.
+    next_attempt_at: Optional[datetime] = None
 
 
 class OrderEvent(SQLModel, table=True):

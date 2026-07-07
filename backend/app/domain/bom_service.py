@@ -257,6 +257,10 @@ def _bom_tree(session: Session, item: Item) -> Optional[dict]:
         "name": item.name,
         # Echoed so the spec editor can prefill (yield_qty=1.0 for carton specs).
         "yield_qty": header.yield_qty if header else 1.0,
+        # The ACTIVE header version, for optimistic concurrency: an editor sends
+        # it back as base_version so a stale save (another officer edited since)
+        # is rejected instead of silently clobbering their lines.
+        "version": header.version if header else 0,
         "components": components,
     }
 
@@ -440,6 +444,10 @@ class BomLineIn(BaseModel):
 class BomIn(BaseModel):
     yield_qty: float = Field(default=1.0, gt=0, allow_inf_nan=False)
     lines: list[BomLineIn] = Field(min_length=1, max_length=100)
+    # Optional optimistic-concurrency token: the ACTIVE version the editor loaded.
+    # When present it must still match, else another officer has edited since and
+    # we 409 instead of clobbering their spec. Omit (None) to force the write.
+    base_version: Optional[int] = None
 
 
 BOM_ENTITY_KIND = "BOM"
@@ -466,6 +474,18 @@ def upsert_bom(session: Session, user: CurrentUser, item: Item,
     OBSOLETE in the same transaction; an OrderEvent records the change."""
     current = _active_header(session, item.id)
     _require_app_owned(current, "edit")
+
+    # Optimistic concurrency: reject a save based on a spec that has since moved.
+    if body.base_version is not None:
+        current_version = current.version if current else 0
+        if body.base_version != current_version:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"Spec changed since you opened it (your v{body.base_version} "
+                    f"vs current v{current_version}); reload and re-apply."
+                ),
+            )
 
     # Resolve + validate components against the catalog.
     lines: list[dict] = []

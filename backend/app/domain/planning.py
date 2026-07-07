@@ -53,9 +53,11 @@ from ..gateway.models import (
     StockSnapshot,
     UsageHistory,
     Vendor,
+    VendorPrice,
 )
 from . import requisitions as req_service
-from .bom_service import _cheapest_vendor_price, make_bom_of
+from .bom_service import make_bom_of
+from .purchasing import _choose_vendor_price
 
 router = APIRouter(prefix="/api", tags=["planning"])
 
@@ -196,8 +198,13 @@ def forecast_kg_by_item(
         parents[f.item_id] = parents.get(f.item_id, 0.0) + f.qty_cartons
 
     bom_of = make_bom_of(session)
-    kg_by_item: dict[str, float] = {}
-    periods_by_item: dict[str, set] = {}
+    # Track per (paper item, PARENT): kg and the set of periods that parent
+    # covers. Averaging per parent stops one fully-entered carton from masking
+    # another carton's not-yet-entered months when both explode to the same
+    # grade — pooling their periods would divide by the wider coverage and
+    # under-state the partially-entered parent's monthly rate.
+    kg_by_pair: dict[tuple, float] = {}
+    periods_by_pair: dict[tuple, set] = {}
     skipped: set = set()
     paper_ids = {it.id for it in _paper_items(session)}
     for period, cartons_by_parent in by_period.items():
@@ -214,33 +221,56 @@ def forecast_kg_by_item(
                 continue
             for mat, kg in exploded.items():
                 if mat in paper_ids:
-                    kg_by_item[mat] = kg_by_item.get(mat, 0.0) + kg
-                    periods_by_item.setdefault(mat, set()).add(period)
-    counts = {item_id: len(p) for item_id, p in periods_by_item.items()}
-    return kg_by_item, counts, sorted(skipped)
+                    key = (mat, parent_id)
+                    kg_by_pair[key] = kg_by_pair.get(key, 0.0) + kg
+                    periods_by_pair.setdefault(key, set()).add(period)
+    # monthly[item] = sum over parents of (parent kg / that parent's months).
+    # covered[item] = the widest parent coverage, for the FORECAST n/3 label.
+    monthly: dict[str, float] = {}
+    covered: dict[str, int] = {}
+    for (mat, _parent), kg in kg_by_pair.items():
+        n = len(periods_by_pair[(mat, _parent)]) or 1
+        monthly[mat] = monthly.get(mat, 0.0) + kg / n
+        covered[mat] = max(covered.get(mat, 0), n)
+    # The engine takes (kg, periods) and divides; return an effective kg so
+    # kg/covered reproduces the per-parent-averaged monthly rate exactly.
+    effective_kg = {mat: monthly[mat] * covered[mat] for mat in monthly}
+    return effective_kg, covered, sorted(skipped)
 
 
 def _usage_history_by_item(session: Session, periods: list[str]) -> dict[str, list[float]]:
-    """{item_id: [one quantity per window month, oldest first]} for every item
-    with any usage history at all.
+    """{item_id: [one quantity per in-scope window month, oldest first]} for every
+    item with any usage history at all.
 
-    Window months with no row count as ZERO movement, not as absent: the BC
-    usage export only emits rows for months with consumption postings, so a
-    quiet month (plant down, grade not run) would otherwise vanish from the
-    average and inflate monthly usage — over-ordering by whole containers.
-    Items with no usage_history anywhere stay out of the result (no basis at
-    all, so the caller falls through to basis NONE rather than a fake zero)."""
+    A window month with no row counts as ZERO movement, NOT as absent — the BC
+    usage export only emits rows for months with consumption postings, so a quiet
+    month (plant down, grade not run) would otherwise vanish and inflate the
+    average. BUT only for months at or after the item's FIRST-EVER usage row: a
+    grade first bought two months ago must average over those two months, not be
+    diluted by leading zeros for months before it existed (that under-planned a
+    new grade by up to 3x). Items with no usage_history anywhere stay out of the
+    result entirely (basis NONE, not a fake zero)."""
     tracked = set(session.exec(select(UsageHistory.item_id).distinct()).all())
+    # Earliest recorded period per item, across ALL history (not just the window).
+    first_period: dict[str, str] = {}
+    for item_id, period in session.exec(
+        select(UsageHistory.item_id, UsageHistory.period)
+    ).all():
+        if item_id not in first_period or period < first_period[item_id]:
+            first_period[item_id] = period
     rows = session.exec(
         select(UsageHistory).where(UsageHistory.period.in_(periods))
     ).all()
     by_item_period: dict[str, dict[str, float]] = {}
     for r in rows:
         by_item_period.setdefault(r.item_id, {})[r.period] = r.quantity
-    return {
-        item_id: [by_item_period.get(item_id, {}).get(p, 0.0) for p in periods]
-        for item_id in tracked
-    }
+    out: dict[str, list[float]] = {}
+    for item_id in tracked:
+        start = first_period.get(item_id, "")
+        # Only window months from the item's first-ever usage month onward.
+        scoped = [p for p in periods if p >= start]
+        out[item_id] = [by_item_period.get(item_id, {}).get(p, 0.0) for p in scoped]
+    return out
 
 
 def _open_po_qty_by_item(session: Session) -> dict[str, float]:
@@ -308,6 +338,9 @@ def order_page(session: Session, today: Optional[date] = None) -> dict:
     items = _paper_items(session)
     item_ids = [it.id for it in items]
 
+    # Resolve the clock ONCE so a run straddling midnight on the 1st can't get a
+    # forward window from one day and a trailing window from the next.
+    today = today or date.today()
     window = forward_periods(engine.COVER_MONTHS, today)
     history_window = trailing_periods(HISTORY_MONTHS, today)
     forecast_kg, forecast_periods, skipped_forecasts = forecast_kg_by_item(session, window)
@@ -318,8 +351,22 @@ def order_page(session: Session, today: Optional[date] = None) -> dict:
 
     rows = []
     requirements_by_vendor: dict[Optional[str], dict[str, float]] = {}
+    no_vendor: list[str] = []          # short grades with no vendor price to buy from
     vendors_by_id: dict[str, Vendor] = {
         v.id: v for v in session.exec(select(Vendor)).all()
+    }
+    # Chosen vendor price per paper item in ONE query, not a SELECT per item.
+    # Group all prices for these items, then apply the SAME tie-break the Phase 3
+    # helper uses (cheapest, then lower lead time) so selection is unchanged.
+    prices_by_item: dict[str, list] = {}
+    if item_ids:
+        for vp in session.exec(
+            select(VendorPrice).where(VendorPrice.item_id.in_(item_ids))
+        ).all():
+            prices_by_item.setdefault(vp.item_id, []).append(vp)
+    chosen_vp = {
+        item_id: _choose_vendor_price(vps)
+        for item_id, vps in prices_by_item.items()
     }
     for it in items:
         st = stock.get(it.id, {"on_hand": 0.0, "allocated": 0.0, "as_of": None})
@@ -335,12 +382,17 @@ def order_page(session: Session, today: Optional[date] = None) -> dict:
             monthly, st["allocated"], st["on_hand"], transit
         )
 
-        vp = _cheapest_vendor_price(session, it.id)
+        vp = chosen_vp.get(it.id)
         vendor = vendors_by_id.get(vp.vendor_id) if vp else None
-        if requirement > 0:
-            requirements_by_vendor.setdefault(
-                vp.vendor_id if vp else None, {}
-            )[it.id] = requirement
+        # Only items with a real vendor go into the container plans. A shortage
+        # with no vendor price can't become a PO (Phase 3 vendor selection drops
+        # it), so consolidating it into a 25 t container and slack-topping it
+        # would inflate a plan that then silently loses the line at PO creation.
+        # Surface it as a 'needs a vendor price' warning instead.
+        if requirement > 0 and vp is not None:
+            requirements_by_vendor.setdefault(vp.vendor_id, {})[it.id] = requirement
+        if requirement > 0 and vp is None:
+            no_vendor.append(it.sku)
 
         rows.append({
             "sku": it.sku,
@@ -398,6 +450,9 @@ def order_page(session: Session, today: Optional[date] = None) -> dict:
         # Roll stock excluded from planning because the item master has a deckle
         # but no grade — master-data fix needed in BC (SOP §9 data integrity).
         "ungraded_roll_skus": _ungraded_roll_skus(session),
+        # Grades below cover that have no vendor price — can't be ordered until a
+        # price is set in BC (they are deliberately kept out of container_plans).
+        "no_vendor_skus": sorted(no_vendor),
         "below_cover": sum(
             1 for r in rows
             if r["months_of_stock"] is not None
@@ -588,6 +643,27 @@ def order_page_endpoint(
     _: CurrentUser = Depends(get_current_user),
 ):
     return order_page(session)
+
+
+@router.get("/planning/summary")
+def planning_summary_endpoint(
+    session: Session = Depends(get_session),
+    _: CurrentUser = Depends(get_current_user),
+):
+    """Slim coverage summary for the Dashboard tile — just the headline counts,
+    not the full rows + container plans the Order Page ships. (The coverage math
+    is the same, but the wire payload is a handful of ints instead of the whole
+    register — the landing page shouldn't download the app's biggest response to
+    render one number.)"""
+    page = order_page(session)
+    return {
+        "cover_months": page["cover_months"],
+        "below_cover": page["below_cover"],
+        "grades_tracked": len(page["rows"]),
+        "order_needed": len(page["container_plans"]) > 0,
+        "no_vendor_skus": page["no_vendor_skus"],
+        "open_coverage_requisition": page["open_coverage_requisition"],
+    }
 
 
 @router.get("/planning/reconciliation")

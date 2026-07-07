@@ -7,15 +7,17 @@ import { num, relativeTime } from '../format.js'
 export default function Dashboard() {
   const { setUser } = useAuth()
   const [data, setData] = useState(null)
-  const [paper, setPaper] = useState(null) // order-page summary; optional
+  const [paper, setPaper] = useState(null) // planning summary; optional
   const [error, setError] = useState('')
 
   useEffect(() => {
     api.get('/api/dashboard')
       .then(setData)
       .catch((e) => (e.status === 401 ? setUser(null) : setError(e.message)))
-    // Paper coverage tile — degrade gracefully (no tile) if the call fails.
-    api.get('/api/planning/order-page')
+    // Paper coverage tile — the slim summary endpoint (below_cover +
+    // cover_months) instead of the full order-page; degrade gracefully (no
+    // tile) if the call fails.
+    api.get('/api/planning/summary')
       .then(setPaper)
       .catch(() => {})
   }, [setUser])

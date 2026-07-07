@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { api } from '../api.js'
 import { useAuth } from '../auth.jsx'
 import { num, relativeTime } from '../format.js'
@@ -13,7 +14,8 @@ import {
 // approval limits the tiered engine routes by, and recovering FAILED outbox
 // rows without a shell.
 export default function Admin() {
-  const { user, setUser } = useAuth()
+  const { user, setUser, refresh } = useAuth()
+  const navigate = useNavigate()
   const [users, setUsers] = useState(null)
   const [roles, setRoles] = useState(null)
   const [system, setSystem] = useState(null)
@@ -35,11 +37,21 @@ export default function Admin() {
   useEffect(load, [load])
 
   async function patchUser(u, body) {
+    // Editing your own row can strip your ADMIN or deactivate you: refresh the
+    // auth context and bounce home afterwards, or a stale context leaves every
+    // subsequent admin call 403-ing with no explanation.
+    const isSelf = !!user && (u.id === user.id || (!!u.email && u.email === user.email))
+    if (isSelf && !window.confirm('This changes your own account — you may lose admin access. Continue?')) return
     setBusy(`user-${u.id}`)
     setError('')
     setNotice('')
     try {
       await api.patch(`/api/admin/users/${u.id}`, body)
+      if (isSelf) {
+        await refresh()
+        navigate('/')
+        return
+      }
       setNotice(`Updated ${u.email}.`)
       load()
     } catch (e) {

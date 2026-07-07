@@ -53,9 +53,9 @@ until set, that source shows clearly-flagged demo data and SSO stays off):
 |--------|---------|
 | `APP_ENV` | defaults to `production`; leave as-is |
 | `ENTRA_TENANT_ID`, `ENTRA_CLIENT_ID`, `ENTRA_CLIENT_SECRET`, `ENTRA_REDIRECT_URI` | Entra ID SSO. Set redirect to `https://procurement.gml.com.fj/auth/callback` and register the same URI in the Entra app. |
-| `BC_BASE_URL`, `BC_COMPANY`, `BC_USERNAME`, `BC_PASSWORD` | Live Business Central item master + price (replaces demo) |
-| `KIWIPLAN_DSN` | Live Kiwiplan stock read |
-| `ACCURA_DSN` | Live Accura stock read |
+| `BC_BASE_URL`, `BC_COMPANY`, `BC_USERNAME`, `BC_PASSWORD`, `BC_AUTH` | Live Business Central (item master, price, PO, usage). See INTEGRATIONS.md §2 for the full BC var set (`BC_PAPER_SKU_REGEX`, `BC_USAGE_ENTRY_TYPES`, entity overrides). |
+| `KIWIPLAN_DSN` **+** `KIWIPLAN_STOCK_SQL` | Live Kiwiplan stock read — needs **both** the DSN and the parameterised query; the DSN alone stays in demo mode |
+| `ACCURA_DSN` **+** `ACCURA_STOCK_SQL` | Live Accura stock read — needs **both** (see INTEGRATIONS.md §3–4) |
 | `GRAPH_TENANT_ID`, `GRAPH_CLIENT_ID`, `GRAPH_CLIENT_SECRET`, `GRAPH_SENDER` | Vendor email (Phase 3) |
 | `BACKUP_KEEP_DAYS/WEEKS/MONTHS` | DB backup retention |
 
@@ -84,7 +84,29 @@ GitOps watches `main`. Feature work lands on a branch (this work is on
 `claude/charming-hopper-7dwif7`); **merging that branch into `main`** triggers
 Portainer to rebuild and redeploy. CI (`.github/workflows/ci.yml`) gates merges.
 
-## 7. Guardrails (do not break — these caused real outages)
+## 7. Backups & restore
+
+The `db-backup` sidecar dumps the DB daily (retention via `BACKUP_KEEP_*`). By
+default dumps land in `./backups` beside the stack — **set `BACKUP_PATH` to an
+absolute host path on a different disk or a LAN file-server mount** so losing the
+host disk doesn't take `pgdata` *and* its only backups. A quick off-host copy,
+e.g. a cron `rsync $BACKUP_PATH fileserver:/procurement-backups/`.
+
+**Restore** (tested procedure):
+1. Stop the app so nothing writes mid-restore: in Portainer, stop the
+   `procurement` app service (leave `db` running).
+2. Pick a dump from `$BACKUP_PATH` (they're gzipped `pg_dump`, newest =
+   `last/fmp-latest.sql.gz`).
+3. Restore into the running db container:
+   `zcat fmp-latest.sql.gz | docker exec -i <db-container> psql -U fmp -d fmp`
+   (drop/recreate the `fmp` DB first if doing a clean restore).
+4. Start the app; it runs `alembic upgrade head` on boot, so a dump from an
+   older schema is migrated forward automatically. Verify at `/health` (db: ok)
+   and spot-check the Stock + Order Page.
+
+Do NOT rotate `DB_PASSWORD` — it is permanent for the life of `pgdata`.
+
+## 8. Guardrails (do not break — these caused real outages)
 
 - Keep `traefik.docker.network=web`. No `ports:` on app/db. FastAPI stays plain
   HTTP on `8000` (Traefik does TLS) — don't add `loadbalancer.server.scheme=https`.

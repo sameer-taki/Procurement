@@ -80,6 +80,17 @@ def _po_events(engine, po_id):
         ).all()
 
 
+def _clear_backoff(engine):
+    """Simulate the exponential-backoff window elapsing so the next
+    process_outbox tick is due to retry (real time passing between scheduler
+    ticks; the test doesn't wait)."""
+    with Session(engine) as s:
+        for row in s.exec(select(IntegrationOutbox)).all():
+            row.next_attempt_at = None
+            s.add(row)
+        s.commit()
+
+
 # --------------------------------------------------------------------------- #
 # Vendor selection (cheapest + MOQ rounding + tie-break)
 # --------------------------------------------------------------------------- #
@@ -315,8 +326,9 @@ def test_failing_bc_post_retries_then_succeeds(client, engine, monkeypatch):
         po = s.get(PurchaseOrder, po_id)
         assert po.status == "PO_ISSUED"     # not acknowledged
 
-    # Recover: real adapter succeeds on the retry.
+    # Recover: real adapter succeeds on the retry (once the backoff has elapsed).
     monkeypatch.undo()
+    _clear_backoff(engine)
     with Session(engine) as s:
         purchasing.process_outbox(s)
     with Session(engine) as s:
@@ -346,8 +358,11 @@ def test_exhausted_bc_post_marked_failed(client, engine, monkeypatch):
         raise RuntimeError("BC down")
 
     monkeypatch.setattr(bc_module.BCAdapter, "create_purchase_order", _boom)
-    # 5 attempts (MAX_ATTEMPTS) -> the 5th flips PENDING to terminal FAILED.
+    # MAX_ATTEMPTS attempts -> the last flips PENDING to terminal FAILED. Clear
+    # the backoff between ticks so each attempt is due (real ticks are spread
+    # across the backoff schedule; the test collapses that wait).
     for _ in range(purchasing.MAX_ATTEMPTS):
+        _clear_backoff(engine)
         with Session(engine) as s:
             purchasing.process_outbox(s)
 

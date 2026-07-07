@@ -87,10 +87,15 @@ async def lifespan(app: FastAPI):
     with Session(engine) as s:
         seed_roles_and_admin(s)
         if settings.seed_demo_on_empty and s.exec(select(Item)).first() is None:
-            # First boot with unconfigured systems → populate from demo data so the
-            # Stock view is immediately usable. No-op once real items exist.
-            stock_service.refresh_all(s)
-            log.info("seeded initial catalog + stock")
+            # First boot → populate so the Stock view is usable. GUARDED: a live
+            # BC that is slow or down at startup must not block or crash the boot
+            # (that would loop-restart the container); the 30-min scheduler will
+            # populate on its next tick. No-op once real items exist.
+            try:
+                stock_service.refresh_all(s)
+                log.info("seeded initial catalog + stock")
+            except Exception:
+                log.exception("initial seed failed; scheduler will retry")
 
     tasks = []
     if settings.stock_refresh_enabled:
@@ -119,7 +124,20 @@ app.add_middleware(
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "env": settings.app_env}
+    """Liveness + DB readiness. Returns 200 with db='ok' when the database
+    answers SELECT 1, else 503 with db='error' so a monitor / the compose
+    healthcheck sees DB-down instead of a falsely-green app."""
+    from sqlalchemy import text
+    from fastapi.responses import JSONResponse
+    try:
+        with Session(engine) as s:
+            s.execute(text("SELECT 1"))
+        db = "ok"
+    except Exception:
+        log.exception("health check: DB probe failed")
+        db = "error"
+    body = {"status": "ok" if db == "ok" else "degraded", "env": settings.app_env, "db": db}
+    return JSONResponse(body, status_code=200 if db == "ok" else 503)
 
 
 # Auth + API routers (all API endpoints under /api). Imported after app exists so
@@ -158,11 +176,24 @@ if os.path.isdir(_static):
     if os.path.isdir(_assets):
         app.mount("/assets", StaticFiles(directory=_assets), name="assets")
 
+    _index = os.path.join(_static, "index.html")
+    _static_root = os.path.realpath(_static)
+
     @app.get("/{full_path:path}", include_in_schema=False)
     async def spa(full_path: str):
         if full_path.startswith(("api/", "auth/", "health")):
             raise HTTPException(status_code=404)
-        candidate = os.path.join(_static, full_path)
-        if full_path and os.path.isfile(candidate):
-            return FileResponse(candidate)
-        return FileResponse(os.path.join(_static, "index.html"))
+        # Serve a real static file ONLY when the resolved path stays inside the
+        # build dir. os.path.join + FileResponse alone is a path-traversal hole:
+        # uvicorn percent-decodes '..%2f' into '../' AFTER routing, so a crafted
+        # path could escape _static and read arbitrary files. realpath-contain
+        # every candidate; anything outside (or not a real file) falls back to
+        # the SPA shell so client-side routes still deep-link.
+        if full_path:
+            candidate = os.path.realpath(os.path.join(_static, full_path))
+            if (
+                (candidate == _static_root or candidate.startswith(_static_root + os.sep))
+                and os.path.isfile(candidate)
+            ):
+                return FileResponse(candidate)
+        return FileResponse(_index)

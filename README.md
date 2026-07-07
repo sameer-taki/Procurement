@@ -10,10 +10,21 @@ Integrates with Business Central (price/SKU, masters, PO, invoice), Kiwiplan
   -> Portainer rebuilds & redeploys at `https://procurement.gml.com.fj`.
 
 ## Status
-- **Phase 1 (Foundations + Stock view)** — done: Alembic migrations + role/admin
-  seed, signed-session auth (bootstrap admin login + Entra OIDC + RBAC), unified
+All six build phases are shipped (deployed at `procurement.gml.com.fj`):
+- **Phase 1 — Foundations + Stock view:** Alembic migrations + role/admin seed,
+  signed-session auth (bootstrap admin login + Entra OIDC + RBAC), unified
   per-SKU Stock view from BC/Kiwiplan/Accura adapters, Dashboard + Stock UI.
-  Unconfigured sources serve clearly-flagged demo data (CLAUDE.md §7 open questions).
+- **Phase 2 — Requisitions + tiered approval** (routed by amount vs role limit).
+- **Phase 3 — PO posting to BC + vendor email** via a reliable, idempotent outbox.
+- **Phase 4 — BOM explosion → suggested requisitions** (board-grade spec CRUD).
+- **Phase 5 — Receiving + 3-way match + analytics warehouse push.**
+- **Phase 6 — Paper planning:** 3-month cover by grade/deckle, forecasts (cartons)
+  exploded to KG, BC usage import, 25 t/FCL consolidation, shipment tracking.
+- Plus an Admin panel (users/roles/system health) and exportable operational Reports.
+
+BC is wired live against the on-prem tenant; unconfigured sources still serve
+clearly-flagged demo data (see CLAUDE.md §7 / INTEGRATIONS.md for the remaining
+tenant-specific confirmations).
 
 ## Local dev
     # 1) DB — Postgres, or just use SQLite for quick dev (export DATABASE_URL=sqlite:///dev.db)

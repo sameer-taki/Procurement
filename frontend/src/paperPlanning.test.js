@@ -334,6 +334,32 @@ describe('parseForecastPaste', () => {
       { customer: 'Fiji Water', sku: 'CTN-1', period: '2026-07', qty_cartons: 100 },
     ])
   })
+  it('tab-splits so a comma-bearing customer name survives (4-col)', () => {
+    const { lines, skipped } = parseForecastPaste(
+      'Visy, Ltd\tCWT140-1400\t2026-07\t1000',
+      '',
+    )
+    expect(lines).toEqual([
+      { customer: 'Visy, Ltd', sku: 'CWT140-1400', period: '2026-07', qty_cartons: 1000 },
+    ])
+    expect(skipped).toBe(0)
+  })
+  it('strips thousands separators from a tab-split quantity', () => {
+    const { lines, skipped } = parseForecastPaste(
+      'Fiji Water\tCTN-FIJIWATER-1L\t2026-07\t42,000',
+      '',
+    )
+    expect(lines).toEqual([
+      { customer: 'Fiji Water', sku: 'CTN-FIJIWATER-1L', period: '2026-07', qty_cartons: 42000 },
+    ])
+    expect(skipped).toBe(0)
+  })
+  it('strips thousands separators from a 3-col tab quantity (default customer)', () => {
+    const { lines } = parseForecastPaste('CTN-FIJIWATER-1L\t2026-07\t1,234,567', 'Fiji Water')
+    expect(lines).toEqual([
+      { customer: 'Fiji Water', sku: 'CTN-FIJIWATER-1L', period: '2026-07', qty_cartons: 1234567 },
+    ])
+  })
   it('accepts tab, comma and semicolon separators in the same paste', () => {
     const { lines, skipped } = parseForecastPaste(
       'A;CTN-1;2026-07;10\nB,CTN-2,2026-08,20\nC\tCTN-3\t2026-09\t30',

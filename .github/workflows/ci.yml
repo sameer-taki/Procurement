@@ -23,6 +23,19 @@ jobs:
           pip install flake8 pytest
       - name: Lint (syntax / undefined-name gate)
         run: flake8 . --select=E9,F63,F7,F82 --show-source
+      - name: Migrations upgrade + downgrade (real DDL, not create_all)
+        # Tests build the schema via create_all, so a broken migration or a
+        # model<->migration drift stays invisible to pytest. Exercise the full
+        # chain up, all the way back down, and up again on a scratch SQLite DB.
+        env:
+          DATABASE_URL: "sqlite:////tmp/ci-migrations.db"
+          SECRET_KEY: "ci-migration-check-key-0123456789-0123456789"
+          RUN_MIGRATIONS_ON_STARTUP: "false"
+          APP_ENV: "test"
+        run: |
+          alembic upgrade head
+          alembic downgrade base
+          alembic upgrade head
       - name: Tests
         env:
           SEED_HISTORY: "false"

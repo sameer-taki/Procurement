@@ -50,8 +50,13 @@ def sync_items(session: Session) -> int:
     """Upsert the item master from BC (incl. cached price). Returns item count."""
     rows = bc.list_items()
     now = datetime.utcnow()
+    # One query for all existing items instead of a SELECT per SKU — at 5000+
+    # items the per-row lookup dominated the 30-min refresh loop.
+    existing = {
+        it.sku: it for it in session.exec(select(Item)).all()
+    }
     for r in rows:
-        item = session.exec(select(Item).where(Item.sku == r["sku"])).first()
+        item = existing.get(r["sku"])
         if item is None:
             item = Item(sku=r["sku"], name=r["name"], item_type=ItemType(r["item_type"]))
         item.name = r["name"]
@@ -343,8 +348,11 @@ def seed_forecasts(session: Session) -> int:
 
 
 def _rows_for(item: Item) -> list[tuple[str, list[dict]]]:
-    """(system, rows) for each operational source that holds this item, skipping
-    a source if its live read fails so one outage can't blank the whole view."""
+    """(system, rows) for each operational source whose live read SUCCEEDED.
+
+    A source whose read raises is omitted so the caller can leave its previous
+    snapshot in place — see refresh_item. `out` only ever contains systems we
+    actually re-read, never a system we failed to reach."""
     out: list[tuple[str, list[dict]]] = []
     for system, adapter, ref in (
         ("KIWIPLAN", kiwiplan, item.kiwiplan_ref),
@@ -360,10 +368,26 @@ def _rows_for(item: Item) -> list[tuple[str, list[dict]]]:
 
 
 def refresh_item(session: Session, item: Item) -> None:
-    """Re-read this item's stock from its systems and replace its snapshots."""
+    """Re-read this item's stock and replace ONLY the snapshots of the sources
+    that answered.
+
+    A source that is down must NOT blank the item: deleting every snapshot up
+    front and rewriting only what came back would drop a temporarily-unreachable
+    system's stock to zero, and the planning engine reads on_hand straight off
+    these rows (a false zero over-orders whole containers). So we delete and
+    rewrite per-successful-system and leave a failed source's prior rows intact —
+    stale, with an old `as_of` the UI already surfaces as not-fresh, which is the
+    honest state (CLAUDE.md: always show how fresh a figure is)."""
     now = datetime.utcnow()
-    session.exec(delete(StockSnapshot).where(StockSnapshot.item_id == item.id))
-    for system, rows in _rows_for(item):
+    fresh = _rows_for(item)
+    for system, rows in fresh:
+        # Replace just THIS system's snapshots for the item.
+        session.exec(
+            delete(StockSnapshot).where(
+                StockSnapshot.item_id == item.id,
+                StockSnapshot.system == system,
+            )
+        )
         for r in rows:
             on_hand = float(r.get("on_hand", 0) or 0)
             allocated = float(r.get("allocated", 0) or 0)
