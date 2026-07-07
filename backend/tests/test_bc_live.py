@@ -304,3 +304,45 @@ def test_demo_vendor_prices_carry_vendor_no():
     assert all("vendor_no" in r and "sku" in r for r in rows)
     visy = [r for r in rows if r["vendor_no"] == "V-2001"]
     assert visy, "demo Visy Board prices should map to V-2001"
+
+
+def test_list_vendor_prices_skips_zero_cost(live):
+    """A missing/<=0 Direct_Unit_Cost is 'not set' in BC — dropped so a synced
+    0.0 can't win cheapest-vendor selection and post a free PO."""
+    live._test_responses["get"] = [{"value": [
+        {"Item_No": "A", "Vendor_No": "V1", "Direct_Unit_Cost": 0},
+        {"Item_No": "B", "Vendor_No": "V1", "Direct_Unit_Cost": None},
+        {"Item_No": "C", "Vendor_No": "V1", "Direct_Unit_Cost": 1.5},
+    ]}]
+    out = live.list_vendor_prices()
+    assert [r["sku"] for r in out] == ["C"]
+
+
+def test_get_inventory_walks_pages_and_coerces(live):
+    """get_inventory paginates and coerces blank/missing Inventory to 0, skipping
+    rows with no item No (a silent-zero mapping bug here would flood the
+    reconciliation view with false variances)."""
+    live._test_responses["get"] = [
+        {"value": [{"No": "WTL175", "Inventory": 40000},
+                   {"No": "BX186", "Inventory": None}],
+         "@odata.nextLink": "page2"},
+        {"value": [{"No": "", "Inventory": 999},          # no No -> skipped
+                   {"No": "RF135", "Inventory": 12000}]},
+    ]
+    inv = live.get_inventory()
+    assert inv == {"WTL175": 40000.0, "BX186": 0.0, "RF135": 12000.0}
+
+
+def test_odata_str_escapes_single_quotes():
+    from app.gateway.bc import _odata_str
+    assert _odata_str("O'Brien Papers") == "O''Brien Papers"
+    assert _odata_str("Golden Manufacturers Pte Ltd") == "Golden Manufacturers Pte Ltd"
+    assert _odata_str(None) == ""
+
+
+def test_company_url_escapes_apostrophe(monkeypatch):
+    from app.config import settings
+    from app.gateway.bc import BCAdapter
+    monkeypatch.setattr(settings, "bc_base_url", "http://bc/ODataV4")
+    monkeypatch.setattr(settings, "bc_company", "O'Brien Co")
+    assert BCAdapter()._company_url() == "http://bc/ODataV4/Company('O''Brien Co')"

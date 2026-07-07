@@ -87,6 +87,14 @@ services:
       - "traefik.http.services.procurement.loadbalancer.server.port=8000"
     mem_limit: 1g
     cpus: "1.5"
+    healthcheck:
+      # /health probes the DB (503 when it can't SELECT 1), so this surfaces a
+      # wedged app to Docker/Portainer instead of it looking up while broken.
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
     logging:
       driver: json-file
       options: { max-size: "10m", max-file: "3" }
@@ -129,7 +137,11 @@ services:
       POSTGRES_EXTRA_OPTS: "-Z6"
       HEALTHCHECK_PORT: "8080"
     volumes:
-      - ./backups:/backups
+      # Default keeps backups beside the stack; set BACKUP_PATH to an absolute
+      # host path OUTSIDE Portainer's GitOps checkout (ideally a different disk
+      # or an NFS/SMB mount to a LAN file server) so a host-disk loss doesn't
+      # take pgdata AND its backups. Restore procedure: DEPLOY.md §Backups.
+      - "${BACKUP_PATH:-./backups}:/backups"
     mem_limit: 512m
     cpus: "0.5"
     logging:

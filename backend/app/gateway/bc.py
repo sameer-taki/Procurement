@@ -30,6 +30,14 @@ F_PP_COST = "Direct_Unit_Cost"
 F_PP_MOQ = "Minimum_Quantity"
 
 
+def _odata_str(value) -> str:
+    """Escape a value for an OData string literal: double any embedded single
+    quotes. A company name / item No / vendor No with an apostrophe (or a crafted
+    value) would otherwise break — or inject into — a $filter or a key predicate.
+    Callers still wrap the result in the surrounding quotes."""
+    return str(value or "").replace("'", "''")
+
+
 def _parse_dateformula_days(value) -> Optional[int]:
     """BC lead time is a dateformula string ('45D', '<2W>', '1M'); normalise to
     days. Unknown/blank shapes -> None (never guess a lead time)."""
@@ -76,7 +84,7 @@ class BCAdapter:
 
     def _company_url(self) -> str:
         base = self.base_url.rstrip("/")
-        return f"{base}/Company('{self.company}')" if self.company else base
+        return f"{base}/Company('{_odata_str(self.company)}')" if self.company else base
 
     def _get(self, url: str, params: Optional[dict] = None, session=None) -> dict:
         import requests
@@ -209,7 +217,7 @@ class BCAdapter:
         """Unit price for one SKU (BC item No). Demo data until BC is wired."""
         if self.use_fakes:
             return fakes.item_price(sku)
-        url = f"{self._company_url()}/{settings.bc_items_entity}('{sku}')"
+        url = f"{self._company_url()}/{settings.bc_items_entity}('{_odata_str(sku)}')"
         try:
             return self._get(url, {"$select": F_PRICE}).get(F_PRICE)
         except Exception:
@@ -247,7 +255,7 @@ class BCAdapter:
         entry_types = [
             t.strip() for t in settings.bc_usage_entry_types.split(",") if t.strip()
         ]
-        type_filter = " or ".join(f"Entry_Type eq '{t}'" for t in entry_types)
+        type_filter = " or ".join(f"Entry_Type eq '{_odata_str(t)}'" for t in entry_types)
         url = f"{self._company_url()}/{settings.bc_usage_entity}"
         by_item_month: dict[tuple, float] = {}
         params = {
@@ -333,7 +341,7 @@ class BCAdapter:
                 if v.get("bc_vendor_no") == vendor_no:
                     return dict(v)
             return None
-        url = f"{self._company_url()}/{settings.bc_vendors_entity}('{vendor_no}')"
+        url = f"{self._company_url()}/{settings.bc_vendors_entity}('{_odata_str(vendor_no)}')"
         try:
             x = self._get(url, {"$select": f"{F_NO},{F_VENDOR_NAME},{F_VENDOR_EMAIL}"})
         except Exception:
@@ -392,7 +400,7 @@ class BCAdapter:
         (External_Document_No carries it) — the retry-safety lookup."""
         url = f"{self._company_url()}/{settings.bc_po_entity}"
         data = self._get(url, {
-            "$filter": f"External_Document_No eq '{number}'",
+            "$filter": f"External_Document_No eq '{_odata_str(number)}'",
             "$select": F_NO, "$top": "1",
         })
         values = data.get("value") or []
@@ -403,7 +411,7 @@ class BCAdapter:
         read that lets us post only the lines a previous attempt didn't."""
         url = f"{self._company_url()}/{settings.bc_po_lines_entity}"
         data = self._get(url, {
-            "$filter": f"Document_No eq '{bc_po_no}'",
+            "$filter": f"Document_No eq '{_odata_str(bc_po_no)}'",
             "$select": f"Line_No,{F_NO}",
         })
         items: set = set()
@@ -518,7 +526,7 @@ class BCAdapter:
         # 1. Item No -> Line_No on the BC order.
         lines_url = f"{self._company_url()}/{settings.bc_po_lines_entity}"
         data = self._get(lines_url, {
-            "$filter": f"Document_No eq '{bc_po_no}'",
+            "$filter": f"Document_No eq '{_odata_str(bc_po_no)}'",
             "$select": f"Line_No,{F_NO}",
         })
         line_no_by_item = {x.get(F_NO): x.get("Line_No") for x in data.get("value", [])}
@@ -540,7 +548,7 @@ class BCAdapter:
                 )
             self._send(
                 "patch",
-                f"{lines_url}(Document_Type='Order',Document_No='{bc_po_no}',Line_No={line_no})",
+                f"{lines_url}(Document_Type='Order',Document_No='{_odata_str(bc_po_no)}',Line_No={line_no})",
                 {"Qty_to_Receive": qty},
                 if_match="*",
             )
@@ -548,13 +556,13 @@ class BCAdapter:
         # 3. Post the receive.
         self._send(
             "post",
-            f"{self._company_url()}/{settings.bc_po_entity}('{bc_po_no}')/{settings.bc_receipt_post_action}",
+            f"{self._company_url()}/{settings.bc_po_entity}('{_odata_str(bc_po_no)}')/{settings.bc_receipt_post_action}",
         )
 
         # 4. The posted receipt's number (best-effort; see docstring).
         try:
             data = self._get(f"{self._company_url()}/{settings.bc_receipt_entity}", {
-                "$filter": f"Order_No eq '{bc_po_no}'",
+                "$filter": f"Order_No eq '{_odata_str(bc_po_no)}'",
                 "$select": F_NO, "$orderby": f"{F_NO} desc", "$top": "1",
             })
             values = data.get("value") or []
@@ -582,7 +590,7 @@ class BCAdapter:
         if not bc_po_no:
             return "PENDING_INVOICE"
         data = self._get(f"{self._company_url()}/{settings.bc_invoice_entity}", {
-            "$filter": f"Order_No eq '{bc_po_no}'",
+            "$filter": f"Order_No eq '{_odata_str(bc_po_no)}'",
             "$select": F_NO, "$top": "1",
         })
         return "MATCHED" if data.get("value") else "PENDING_INVOICE"

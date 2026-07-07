@@ -50,8 +50,6 @@ def test_spa_fallback_blocks_path_traversal(client, tmp_path, monkeypatch):
     """A percent-encoded ../ escape must fall back to the SPA shell (or 404),
     never read a file outside the static dir. We point the app at a real static
     dir with an index.html + a secret sibling file it must refuse."""
-    import app.main as main_mod
-
     static = tmp_path / "static"
     static.mkdir()
     (static / "index.html").write_text("<!doctype html><title>SPA</title>")
@@ -253,3 +251,124 @@ def test_reports_csv_neutralises_formula_injection():
     assert _csv_safe("-2+3") == "'-2+3"
     assert _csv_safe("Normal Vendor Ltd") == "Normal Vendor Ltd"
     assert _csv_safe(1234.5) == 1234.5             # numbers untouched
+
+
+# --------------------------------------------------------------------------- #
+# Batch A/B/C/E behaviours from the codebase audit
+# --------------------------------------------------------------------------- #
+def test_vendorless_shortage_surfaced_not_planned(client, engine):
+    """A below-cover grade with no vendor price is reported in no_vendor_skus and
+    kept OUT of container_plans (a Phase-3 PO can't be built for it)."""
+    from sqlmodel import select as _sel
+    from app.gateway.models import Item, VendorPrice
+    with Session(engine) as s:
+        it = s.exec(_sel(Item).where(Item.sku == "BX200-1950")).first()
+        for vp in s.exec(_sel(VendorPrice).where(VendorPrice.item_id == it.id)).all():
+            s.delete(vp)
+        s.commit()
+    as_role("VIEWER")
+    page = client.get("/api/planning/order-page").json()
+    assert "BX200-1950" in page["no_vendor_skus"]
+    planned = {ln["sku"] for p in page["container_plans"] for ln in p["lines"]}
+    assert "BX200-1950" not in planned
+
+
+def test_history_averages_from_first_usage_month(client, engine):
+    """A grade whose first-ever usage row is mid-window averages over the months
+    it existed, not diluted by leading zeros before it existed."""
+    from sqlmodel import select as _sel
+    from app.gateway.models import Item, UsageHistory
+    from app.domain.planning import trailing_periods
+    win = trailing_periods(3)
+    with Session(engine) as s:
+        it = s.exec(_sel(Item).where(Item.sku == "BX200-1950")).first()
+        # Wipe its history, then record usage ONLY in the newest window month.
+        for u in s.exec(_sel(UsageHistory).where(UsageHistory.item_id == it.id)).all():
+            s.delete(u)
+        s.commit()
+        s.add(UsageHistory(item_id=it.id, period=win[-1], quantity=6000))
+        s.commit()
+    as_role("VIEWER")
+    rows = {r["sku"]: r for r in client.get("/api/planning/order-page").json()["rows"]}
+    # Averaged over 1 month (its first), not (0+0+6000)/3.
+    assert rows["BX200-1950"]["monthly_history"] == pytest.approx(6000)
+
+
+def test_cancel_approved_requisition_without_pos(client, engine):
+    """An APPROVED coverage/manual req with no POs is a dead end unless it can be
+    cancelled — it otherwise blocks the next coverage run forever."""
+    as_role("REQUESTER")
+    req = client.post("/api/requisitions",
+                      json={"lines": [{"sku": "BOARD-200K", "quantity": 10}]}).json()
+    client.post(f"/api/requisitions/{req['id']}/submit")
+    as_role("ADMIN", email="admin")
+    client.post(f"/api/requisitions/{req['id']}/approve")
+    r = client.post(f"/api/requisitions/{req['id']}/cancel")
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "CANCELLED"
+
+
+def test_outbox_failure_sets_backoff(client, engine, monkeypatch):
+    """A failed post defers the next attempt (next_attempt_at in the future) so a
+    BC outage can't burn the whole budget in minutes."""
+    from app.domain import purchasing
+    from app.gateway import bc as bc_module
+    from app.gateway.models import IntegrationOutbox
+    from sqlmodel import select as _sel
+    as_role("REQUESTER")
+    req = client.post("/api/requisitions",
+                      json={"lines": [{"sku": "BOARD-200K", "quantity": 1000}]}).json()
+    client.post(f"/api/requisitions/{req['id']}/submit")
+    as_role("ADMIN", email="admin")
+    client.post(f"/api/requisitions/{req['id']}/approve")
+    as_role("OFFICER")
+    po = client.post(f"/api/requisitions/{req['id']}/create-po").json()[0]
+    monkeypatch.setattr(purchasing.settings, "outbox_process_on_issue", False, raising=False)
+    client.post(f"/api/purchase-orders/{po['id']}/issue")
+    monkeypatch.setattr(bc_module.BCAdapter, "create_purchase_order",
+                        lambda self, payload: (_ for _ in ()).throw(RuntimeError("down")))
+    with Session(engine) as s:
+        purchasing.process_outbox(s)
+        row = s.exec(_sel(IntegrationOutbox).where(
+            IntegrationOutbox.entity_ref == po["id"])).first()
+        assert row.status == "PENDING"
+        assert row.next_attempt_at is not None       # backoff scheduled
+
+
+def test_admin_cannot_cap_admin_role_limit(admin_client):
+    r = admin_client.patch("/api/admin/roles/ADMIN", json={"approval_limit": 100})
+    assert r.status_code == 409
+    r2 = admin_client.patch("/api/admin/roles/OFFICER", json={"approval_limit": 9999})
+    assert r2.status_code == 200          # other roles still editable
+
+
+def test_resend_vendor_email_requires_posted_po(client, engine):
+    as_role("REQUESTER")
+    req = client.post("/api/requisitions",
+                      json={"lines": [{"sku": "BOARD-200K", "quantity": 1000}]}).json()
+    client.post(f"/api/requisitions/{req['id']}/submit")
+    as_role("ADMIN", email="admin")
+    client.post(f"/api/requisitions/{req['id']}/approve")
+    as_role("OFFICER")
+    po = client.post(f"/api/requisitions/{req['id']}/create-po").json()[0]
+    # DRAFT PO (never issued -> no BC crosswalk) -> 409.
+    assert client.post(f"/api/purchase-orders/{po['id']}/resend-email").status_code == 409
+
+
+def test_health_reports_db_ok(client):
+    r = client.get("/health")
+    assert r.status_code == 200
+    assert r.json()["db"] == "ok"
+
+
+def test_scheduler_jobs_run_against_demo(engine, monkeypatch):
+    """The three scheduler job bodies execute end-to-end against the demo fakes —
+    a break here would silently stop stock refresh / BC posting / usage import."""
+    from sqlmodel import Session as _S
+    import app.domain.stock_service as ss
+    import app.domain.purchasing as pu
+    import app.domain.planning as pl
+    with _S(engine) as s:
+        ss.refresh_all(s)           # stock-refresh job body
+        pu.process_outbox(s)        # outbox job body
+        pl.import_usage(s)          # usage-import job body

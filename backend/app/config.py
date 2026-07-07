@@ -11,6 +11,10 @@ class Settings(BaseSettings):
 
     app_env: str = "production"
     database_url: str = "postgresql+psycopg://fmp:fmp@db:5432/fmp"
+    # Connection pool (server DBs only; SQLite ignores these). Defaults comfortably
+    # cover the request threadpool + 3 background schedulers on the single worker.
+    db_pool_size: int = 10
+    db_max_overflow: int = 20
     secret_key: str = "CHANGE_ME_32_CHARS_MINIMUM_PLACEHOLDER"
     first_admin_username: str = "admin"
     first_admin_password: str = "admin"

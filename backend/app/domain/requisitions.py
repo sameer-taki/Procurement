@@ -53,17 +53,17 @@ class LineIn(BaseModel):
 
 
 class RequisitionIn(BaseModel):
-    cost_center: Optional[str] = None
-    lines: list[LineIn]
+    cost_center: Optional[str] = Field(default=None, max_length=60)
+    lines: list[LineIn] = Field(min_length=1, max_length=500)
 
 
 class RequisitionUpdate(BaseModel):
-    cost_center: Optional[str] = None
-    lines: Optional[list[LineIn]] = None
+    cost_center: Optional[str] = Field(default=None, max_length=60)
+    lines: Optional[list[LineIn]] = Field(default=None, max_length=500)
 
 
 class RejectIn(BaseModel):
-    reason: str
+    reason: str = Field(max_length=1000)
 
 
 # --------------------------------------------------------------------------- #

@@ -87,10 +87,15 @@ async def lifespan(app: FastAPI):
     with Session(engine) as s:
         seed_roles_and_admin(s)
         if settings.seed_demo_on_empty and s.exec(select(Item)).first() is None:
-            # First boot with unconfigured systems → populate from demo data so the
-            # Stock view is immediately usable. No-op once real items exist.
-            stock_service.refresh_all(s)
-            log.info("seeded initial catalog + stock")
+            # First boot → populate so the Stock view is usable. GUARDED: a live
+            # BC that is slow or down at startup must not block or crash the boot
+            # (that would loop-restart the container); the 30-min scheduler will
+            # populate on its next tick. No-op once real items exist.
+            try:
+                stock_service.refresh_all(s)
+                log.info("seeded initial catalog + stock")
+            except Exception:
+                log.exception("initial seed failed; scheduler will retry")
 
     tasks = []
     if settings.stock_refresh_enabled:
@@ -119,7 +124,20 @@ app.add_middleware(
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "env": settings.app_env}
+    """Liveness + DB readiness. Returns 200 with db='ok' when the database
+    answers SELECT 1, else 503 with db='error' so a monitor / the compose
+    healthcheck sees DB-down instead of a falsely-green app."""
+    from sqlalchemy import text
+    from fastapi.responses import JSONResponse
+    try:
+        with Session(engine) as s:
+            s.execute(text("SELECT 1"))
+        db = "ok"
+    except Exception:
+        log.exception("health check: DB probe failed")
+        db = "error"
+    body = {"status": "ok" if db == "ok" else "degraded", "env": settings.app_env, "db": db}
+    return JSONResponse(body, status_code=200 if db == "ok" else 503)
 
 
 # Auth + API routers (all API endpoints under /api). Imported after app exists so
