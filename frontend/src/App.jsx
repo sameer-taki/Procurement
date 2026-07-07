@@ -13,6 +13,7 @@ import PurchaseOrderDetail from './pages/PurchaseOrderDetail.jsx'
 import Planning from './pages/Planning.jsx'
 import PaperPlanning from './pages/PaperPlanning.jsx'
 import Forecasts from './pages/Forecasts.jsx'
+import Customers from './pages/Customers.jsx'
 import Shipments from './pages/Shipments.jsx'
 import Analytics from './pages/Analytics.jsx'
 import Reports from './pages/Reports.jsx'
@@ -55,6 +56,7 @@ function Shell() {
           <NavLink to="/planning">Planning</NavLink>
           <NavLink to="/paper-planning">Order Page</NavLink>
           <NavLink to="/forecasts">Forecasts</NavLink>
+          <NavLink to="/customers">Customers</NavLink>
           <NavLink to="/shipments">Shipping</NavLink>
           <NavLink to="/analytics">Analytics</NavLink>
           <NavLink to="/reports">Reports</NavLink>
@@ -82,6 +84,7 @@ function Shell() {
             <Route path="/planning" element={<Planning />} />
             <Route path="/paper-planning" element={<PaperPlanning />} />
             <Route path="/forecasts" element={<Forecasts />} />
+            <Route path="/customers" element={<Customers />} />
             <Route path="/shipments" element={<Shipments />} />
             <Route path="/analytics" element={<Analytics />} />
             <Route path="/reports" element={<Reports />} />

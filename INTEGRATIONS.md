@@ -66,6 +66,7 @@ code change**. The defaults (override any that differ):
 | `BC_RECEIPT_ENTITY` | `PurchRcptHeaders` | posted-receipt number readback |
 | `BC_INVOICE_ENTITY` | `PurchInvHeaders` | 3-way match (posted invoice = MATCHED) |
 | `BC_VENDORS_ENTITY` | `Vendors` | vendor master sync |
+| `BC_CUSTOMERS_ENTITY` | `Customers` | customer master sync (forecast picker) |
 | `BC_PURCHASE_PRICES_ENTITY` | `Purchase_Prices` | vendor price/MOQ sync |
 | `BC_USAGE_ENTITY` | `ItemLedgerEntries` | usage export (SOP step 3) |
 | `BC_RECEIPT_POST_ACTION` | `Microsoft.NAV.Post` | bound action that posts the receive |
@@ -109,6 +110,11 @@ BC14 on-prem, instance `BC140`, http on 7048):**
   current without the manual button — the SOP §9 cadence.
 * **Item master:** on-prem BC only exposes published services — publish
   **Page 31 as service name `Items`** (Web Services page in the client).
+* **Customer master:** likewise publish **Page 22 as service name `Customers`**
+  (Web Services page). The adapter reads `No` / `Name` / `E_Mail` and syncs into
+  the app's `customers` table (BC-owned, read-only in the app), which feeds the
+  Forecasts customer picker and the Customers screen. Until it is published the
+  app serves the demo customer list.
 * **Grade + deckle:** stock is planned by grade AND deckle (roll width). The
   adapter reads explicit fields when `BC_GRADE_FIELD` / `BC_DECKLE_FIELD` are
   set; otherwise it parses the item No against `BC_PAPER_SKU_REGEX`. The deckle

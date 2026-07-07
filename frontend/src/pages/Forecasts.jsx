@@ -141,6 +141,8 @@ export default function Forecasts() {
 // unknown sku (404).
 function ForecastForm({ onSaved, setUser }) {
   const [customer, setCustomer] = useState('')
+  const [custResults, setCustResults] = useState([])
+  const [custHide, setCustHide] = useState(false)
   const [q, setQ] = useState('')
   const [results, setResults] = useState([])
   const [item, setItem] = useState(null) // {sku, name}
@@ -163,6 +165,25 @@ function ForecastForm({ onSaved, setUser }) {
     }, 200)
     return () => clearTimeout(handle)
   }, [q, setUser])
+
+  // Customer typeahead against the BC-synced master. Free text is still allowed
+  // (a forecast can name a customer not yet in the master); picking a suggestion
+  // just fills the field with the canonical name.
+  useEffect(() => {
+    if (custHide || !customer.trim()) { setCustResults([]); return }
+    const handle = setTimeout(() => {
+      api.get(`/api/customers?q=${encodeURIComponent(customer)}`)
+        .then((d) => setCustResults(d || []))
+        .catch((e) => (e.status === 401 ? setUser(null) : setError(e.message)))
+    }, 200)
+    return () => clearTimeout(handle)
+  }, [customer, custHide, setUser])
+
+  function pickCustomer(c) {
+    setCustomer(c.name)
+    setCustHide(true)
+    setCustResults([])
+  }
 
   function pick(r) {
     setItem({ sku: r.sku, name: r.name })
@@ -203,9 +224,21 @@ function ForecastForm({ onSaved, setUser }) {
           <input
             className="input"
             value={customer}
-            onChange={(e) => setCustomer(e.target.value)}
+            onChange={(e) => { setCustHide(false); setCustomer(e.target.value) }}
             placeholder="e.g. Fiji Water"
           />
+          {custResults.length > 0 && (
+            <ul className="suggest">
+              {custResults.slice(0, 8).map((c) => (
+                <li key={c.bc_customer_no || c.name}>
+                  <button type="button" className="suggest-item" onClick={() => pickCustomer(c)}>
+                    <span><strong>{c.name}</strong></span>
+                    <span className="muted small">{c.bc_customer_no || ''}</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
         </label>
         <label className="field">
           <span className="field-label">Month</span>
