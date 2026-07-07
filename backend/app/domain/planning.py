@@ -645,6 +645,27 @@ def order_page_endpoint(
     return order_page(session)
 
 
+@router.get("/planning/summary")
+def planning_summary_endpoint(
+    session: Session = Depends(get_session),
+    _: CurrentUser = Depends(get_current_user),
+):
+    """Slim coverage summary for the Dashboard tile — just the headline counts,
+    not the full rows + container plans the Order Page ships. (The coverage math
+    is the same, but the wire payload is a handful of ints instead of the whole
+    register — the landing page shouldn't download the app's biggest response to
+    render one number.)"""
+    page = order_page(session)
+    return {
+        "cover_months": page["cover_months"],
+        "below_cover": page["below_cover"],
+        "grades_tracked": len(page["rows"]),
+        "order_needed": len(page["container_plans"]) > 0,
+        "no_vendor_skus": page["no_vendor_skus"],
+        "open_coverage_requisition": page["open_coverage_requisition"],
+    }
+
+
 @router.get("/planning/reconciliation")
 def reconciliation_endpoint(
     session: Session = Depends(get_session),

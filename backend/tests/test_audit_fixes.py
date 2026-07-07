@@ -372,3 +372,33 @@ def test_scheduler_jobs_run_against_demo(engine, monkeypatch):
         ss.refresh_all(s)           # stock-refresh job body
         pu.process_outbox(s)        # outbox job body
         pl.import_usage(s)          # usage-import job body
+
+
+# --------------------------------------------------------------------------- #
+# Batch F backend support: BOM optimistic concurrency + planning summary
+# --------------------------------------------------------------------------- #
+def test_bom_stale_base_version_rejected(client):
+    """A spec PUT carrying a base_version that no longer matches the ACTIVE
+    header is refused (409) instead of clobbering a concurrent edit."""
+    as_role("OFFICER")
+    tree = client.get("/api/items/CTN-FIJIWATER-1L/bom").json()
+    v = tree["version"]
+    body = {"yield_qty": 1.0, "lines": [{"sku": "CWT140-1400", "qty_per": 0.5}]}
+    # First save with the correct base_version succeeds and bumps the version.
+    ok = client.put("/api/items/CTN-FIJIWATER-1L/bom", json={**body, "base_version": v})
+    assert ok.status_code == 200, ok.text
+    # A second save still quoting the OLD version is stale -> 409.
+    stale = client.put("/api/items/CTN-FIJIWATER-1L/bom", json={**body, "base_version": v})
+    assert stale.status_code == 409
+    # Omitting base_version forces the write (no optimistic check).
+    forced = client.put("/api/items/CTN-FIJIWATER-1L/bom", json=body)
+    assert forced.status_code == 200
+
+
+def test_planning_summary_is_slim(client):
+    as_role("VIEWER")
+    s = client.get("/api/planning/summary").json()
+    assert set(s) >= {"cover_months", "below_cover", "grades_tracked",
+                      "order_needed", "no_vendor_skus", "open_coverage_requisition"}
+    # It's a summary — no heavy rows/plans arrays.
+    assert "rows" not in s and "container_plans" not in s
