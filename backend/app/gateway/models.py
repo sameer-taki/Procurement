@@ -95,6 +95,19 @@ class Vendor(SQLModel, table=True):
     email: Optional[str] = None
 
 
+class Customer(SQLModel, table=True):
+    """Customer master, mirrored read-only from BC (BC owns customer/vendor
+    masters — CLAUDE.md §2). The app doesn't create customers; it syncs them so
+    a forecast's 'customer' can be picked from the canonical BC list rather than
+    free-typed. Keyed by the BC customer No."""
+    __tablename__ = "customers"
+    id: str = Field(default_factory=uid, primary_key=True)
+    bc_customer_no: Optional[str] = Field(default=None, index=True)
+    name: str = Field(index=True)
+    email: Optional[str] = None
+    active: bool = True
+
+
 class VendorPrice(SQLModel, table=True):
     __tablename__ = "vendor_prices"
     id: str = Field(default_factory=uid, primary_key=True)

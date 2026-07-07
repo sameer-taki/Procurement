@@ -370,6 +370,17 @@ def forecasts(today: Optional[date] = None) -> list[dict]:
     ]
 
 
+def customers() -> list[dict]:
+    """Customer master as BC would expose it. Includes the demo-forecast
+    customer ('Fiji Water') so the picker resolves out of the box."""
+    return [
+        {"bc_customer_no": "C-1001", "name": "Fiji Water", "email": "orders@fijiwater.example"},
+        {"bc_customer_no": "C-1002", "name": "Pure Fiji", "email": "supply@purefiji.example"},
+        {"bc_customer_no": "C-1003", "name": "Paradise Beverages", "email": "procurement@paradise.example"},
+        {"bc_customer_no": "C-1004", "name": "Rooster Poultry", "email": "packaging@rooster.example"},
+    ]
+
+
 def boms() -> list[dict]:
     """BOM definitions: one row per parent with its owner + component lines."""
     return [

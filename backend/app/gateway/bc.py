@@ -334,6 +334,31 @@ class BCAdapter:
                 url = data.get("@odata.nextLink")
         return out
 
+    def list_customers(self) -> list[dict]:
+        """Customer master: [{bc_customer_no, name, email}]. BC owns customers
+        (CLAUDE.md §2); live mode syncs them into the app's read-only mirror so
+        the forecast customer can be picked from the canonical list. Publish
+        Page 22 (Customer List) as the `Customers` web service on the tenant."""
+        if self.use_fakes:
+            return fakes.customers()
+        url = f"{self._company_url()}/{settings.bc_customers_entity}"
+        out: list[dict] = []
+        params = {"$select": f"{F_NO},{F_VENDOR_NAME},{F_VENDOR_EMAIL}"}
+        with self._session() as s:
+            while url:
+                data = self._get(url, params, session=s)
+                params = None
+                for x in data.get("value", []):
+                    no = x.get(F_NO)
+                    if no:
+                        out.append({
+                            "bc_customer_no": no,
+                            "name": x.get(F_VENDOR_NAME) or no,
+                            "email": x.get(F_VENDOR_EMAIL) or None,
+                        })
+                url = data.get("@odata.nextLink")
+        return out
+
     def get_vendor(self, vendor_no: str) -> Optional[dict]:
         """One vendor by BC No; None when unknown."""
         if self.use_fakes:

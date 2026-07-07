@@ -19,6 +19,7 @@ from ..gateway.models import (
     BomHeader,
     BomLine,
     BomOwner,
+    Customer,
     Forecast,
     Item,
     ItemType,
@@ -130,6 +131,50 @@ def seed_vendors(session: Session) -> int:
             price=row["price"], currency="FJD",
             moq=row.get("moq"), lead_time_days=row.get("lead_time_days"),
         ))
+        count += 1
+    session.commit()
+    return count
+
+
+def seed_customers(session: Session) -> int:
+    """Seed demo customers when the table is empty (demo mode only). Idempotent:
+    no-op once any customer exists, or when BC is live (sync_customers owns that).
+    Returns the customer count after seeding."""
+    if not bc.use_fakes:
+        return len(session.exec(select(Customer)).all())
+    if session.exec(select(Customer)).first() is not None:
+        return len(session.exec(select(Customer)).all())
+    count = 0
+    for c in fakes.customers():
+        session.add(Customer(bc_customer_no=c.get("bc_customer_no"),
+                             name=c["name"], email=c.get("email")))
+        count += 1
+    session.commit()
+    return count
+
+
+def sync_customers(session: Session) -> int:
+    """Live-mode customer master sync: upsert Customer rows by bc_customer_no from
+    BC's customer entity (BC owns customers — CLAUDE.md §2; the app's table is a
+    read-only mirror the forecast picker selects from). Demo mode no-ops (the
+    seed owns that path). Never deletes — a customer missing from a partial read
+    must not vanish from historical forecasts."""
+    if bc.use_fakes:
+        return 0
+    rows = bc.list_customers()
+    by_no = {
+        c.bc_customer_no: c
+        for c in session.exec(select(Customer)).all() if c.bc_customer_no
+    }
+    count = 0
+    for r in rows:
+        cust = by_no.get(r["bc_customer_no"])
+        if cust is None:
+            cust = Customer(bc_customer_no=r["bc_customer_no"], name=r["name"])
+            by_no[r["bc_customer_no"]] = cust
+        cust.name = r["name"]
+        cust.email = r.get("email")
+        session.add(cust)
         count += 1
     session.commit()
     return count
@@ -411,6 +456,10 @@ def refresh_all(session: Session) -> int:
     # no-op in demo mode, mirroring how seed_vendors no-ops in live mode).
     sync_vendors(session)
     sync_vendor_prices(session)
+    # Customer master (for the forecast picker): demo seed OR live BC sync, the
+    # same demo/live split as vendors.
+    seed_customers(session)
+    sync_customers(session)
     # Seed demo BOMs the same way (no-op once any BOM exists / when BC is live) so
     # the explosion service + suggested requisitions work out of the box.
     seed_boms(session)

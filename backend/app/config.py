@@ -74,6 +74,7 @@ class Settings(BaseSettings):
     bc_po_lines_entity: str = "PurchaseOrderLines"   # purchase-order lines entity set
     bc_invoice_entity: str = "PurchInvHeaders"       # posted purchase invoices (3-way match)
     bc_vendors_entity: str = "Vendors"               # vendor master
+    bc_customers_entity: str = "Customers"           # customer master (publish Page 22 as 'Customers')
     bc_purchase_prices_entity: str = "Purchase_Prices"  # vendor price list (price/SKU/MOQ)
     bc_receipt_post_action: str = "Microsoft.NAV.Post"  # bound action that posts the receive
     # Grade + deckle (SOP §3): name the item-master OData fields if BC carries them
