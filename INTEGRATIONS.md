@@ -44,14 +44,38 @@ demoted). Verify: sign in via Microsoft → `/api/me` shows your mapped role.
 | `BC_VERIFY_TLS` | `false` only for a self-signed on-prem cert |
 | `BC_ITEMS_ENTITY` | item-master entity set (default `Items`) |
 
-**Confirm:** the entity name and that the standard fields `No`, `Description`,
-`Base_Unit_of_Measure`, `Unit_Price` exist (they're the defaults the adapter reads;
-they're the single place in `bc.py` to change if yours differ). `list_items` follows
-OData `@odata.nextLink` pagination; price comes from `Unit_Price`.
+**The full live loop is built** — item master, price list, vendors, usage, PO
+posting (header + lines, retry-safe), receipt posting (Qty_to_Receive + post
+action) and the invoice-based 3-way-match signal all speak standard BC V4
+page-based OData. Every entity set, field name and mapping convention is a
+setting, so pointing the adapter at your tenant is an **env-var exercise, not a
+code change**. The defaults (override any that differ):
 
-**Still open (tell me and I'll wire):** how to derive `item_type` from your item
-categories, `reorder_point`/`lead_time`, and — important — the **crosswalk** from a BC
-item to its Kiwiplan/Accura material id (see note below).
+| Env var | Default | Used for |
+|---------|---------|----------|
+| `BC_ITEMS_ENTITY` | `Items` | item master + `Inventory` reconciliation read |
+| `BC_PO_ENTITY` | `PurchaseOrders` | PO header create + receive post action |
+| `BC_PO_LINES_ENTITY` | `PurchaseOrderLines` | PO line posting, `Qty_to_Receive` |
+| `BC_RECEIPT_ENTITY` | `PurchRcptHeaders` | posted-receipt number readback |
+| `BC_INVOICE_ENTITY` | `PurchInvHeaders` | 3-way match (posted invoice = MATCHED) |
+| `BC_VENDORS_ENTITY` | `Vendors` | vendor master sync |
+| `BC_PURCHASE_PRICES_ENTITY` | `Purchase_Prices` | vendor price/MOQ sync |
+| `BC_USAGE_ENTITY` | `ItemLedgerEntries` | usage export (SOP step 3) |
+| `BC_RECEIPT_POST_ACTION` | `Microsoft.NAV.Post` | bound action that posts the receive |
+| `BC_REORDER_POINT_FIELD` | `Reorder_Point` | item reorder point (0 = unset) |
+| `BC_LEAD_TIME_FIELD` | `Lead_Time_Calculation` | dateformula → days (`45D`/`2W`/`1M`) |
+| `BC_REPLENISHMENT_FIELD` | *(blank)* | e.g. `Replenishment_System`; `Prod. Order` ⇒ FINISHED |
+
+Standard shared fields `No` / `Description` / `Base_Unit_of_Measure` /
+`Unit_Price` / `Inventory` / `Name` / `E_Mail` / `Item_No` / `Vendor_No` /
+`Direct_Unit_Cost` / `Minimum_Quantity` are constants at the top of `bc.py` —
+the single place to change if your tenant renames them. All reads follow
+`@odata.nextLink` pagination.
+
+**Retry-safety:** the app's PO number rides in `External_Document_No`, so a
+retried post finds the existing BC document and completes its lines instead of
+duplicating the header; receipts sum `Qty_to_Receive` per item and never re-post
+a GRN that already has its crosswalk.
 
 ### Paper planning: the usage export + grade/deckle
 
@@ -68,18 +92,31 @@ BC14 on-prem, instance `BC140`, http on 7048):**
 | `BC_USAGE_ENTRY_TYPES` | default `Negative Adjmt.,Consumption` — Kiwiplan job usage posts as **Negative Adjmt.**; 'Consumption' returned nothing on this tenant |
 
 * **Usage (SOP step 3):** `BCAdapter.get_usage_entries` reads the item ledger
-  filtered to those entry types since the trailing window start and aggregates
-  to KG per item per month (`POST /api/planning/import-usage`). Field names
-  confirmed on BC140: `Item_No` / `Posting_Date` ('YYYY-MM-DD') / `Quantity`
-  (signed) / `Entry_Type`. The service is a QUERY object: `$filter`/`$select`/
-  `$top` work, `$orderby` does not (the adapter never uses it).
+  filtered to the `BC_USAGE_ENTRY_TYPES` since the trailing window start and
+  aggregates to KG per item per month (`POST /api/planning/import-usage`).
+  Field names confirmed on BC140: `Item_No` / `Posting_Date` ('YYYY-MM-DD') /
+  `Quantity` (signed) / `Entry_Type`. The service is a QUERY object:
+  `$filter`/`$select`/`$top` work, `$orderby` does not (the adapter never uses
+  it). The import also runs on a schedule (default daily;
+  `USAGE_IMPORT_ENABLED` / `USAGE_IMPORT_SECONDS`) so trailing averages stay
+  current without the manual button — the SOP §9 cadence.
 * **Item master:** on-prem BC only exposes published services — publish
   **Page 31 as service name `Items`** (Web Services page in the client).
-* **Grade + deckle:** BC item numbers ARE the grade (`WTL175`, `BX186`) — one
-  item per grade, no deckle in the item number. Where deckle lives (lot no. /
-  variant / Kiwiplan-only) is still to be confirmed before `_map_item` fills
-  `items.deckle_mm`; grade can map from the item no. / category once the paper
-  category code is known.
+* **Grade + deckle:** stock is planned by grade AND deckle (roll width). The
+  adapter reads explicit fields when `BC_GRADE_FIELD` / `BC_DECKLE_FIELD` are
+  set; otherwise it parses the item No against `BC_PAPER_SKU_REGEX`. The deckle
+  regex group is optional — **on GML's tenant the item No IS the grade**
+  (`WTL175`, `BX186`; one item per grade, no deckle suffix), so go-live needs a
+  grade-only pattern, e.g. `BC_PAPER_SKU_REGEX=^([A-Z]{2,4}\d{3})$` scoped to
+  the real grade shapes. Where deckle lives (lot no. / variant / Kiwiplan-only)
+  is still to be confirmed; until then live paper plans per grade. A roll item
+  that arrives with a deckle but **no grade** is excluded from planning and
+  flagged on the Order Page.
+* **Reconciliation (SOP §9):** `BCAdapter.get_inventory` reads BC's on-hand per
+  item (`$select=No,Inventory` on the items entity) for the Order Page's
+  BC-vs-production stock check (`GET /api/planning/reconciliation`). **Confirm:**
+  that your items entity exposes the `Inventory` flowfield (a location-filtered
+  Item_Ledger balance may be needed if BC tracks locations the app does not).
 
 ---
 
@@ -146,10 +183,14 @@ Azure SQL ODBC driver name on the Docker host.
 ## Important: the cross-system crosswalk
 
 The Stock view fetches a material's Kiwiplan/Accura stock using `item.kiwiplan_ref` /
-`item.accura_ref`. In **demo** mode those refs are set for you. In **live** mode, BC's
-item master doesn't yet tell us which BC item corresponds to which Kiwiplan/Accura
-material — that mapping is an open decision. So even with BC + Kiwiplan + Accura all
-configured, per-material stock stays empty until we populate those refs (e.g. a naming
-convention, a BC field, or a small mapping table). Tell me how the codes line up across
-your three systems and I'll wire the crosswalk — that's the last piece for end-to-end
+`item.accura_ref`. The mapping is configurable via `CROSSWALK_MODE`:
+
+| Mode | Behaviour |
+|------|-----------|
+| `sku` *(default)* | the BC item No IS the material code in Kiwiplan/Accura (a stock read for a code a system doesn't carry just returns no rows) |
+| `fields` | read the refs from the item-master OData fields named in `BC_KIWIPLAN_REF_FIELD` / `BC_ACCURA_REF_FIELD` |
+| `none` | leave refs unset — per-material stock stays empty until mapped |
+
+If the codes don't line up 1:1 across your three systems, switch to `fields` (or
+tell me the convention and I'll add it). This is the last piece for end-to-end
 live stock.

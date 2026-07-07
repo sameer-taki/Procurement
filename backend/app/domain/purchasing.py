@@ -560,16 +560,28 @@ def enqueue_receipt(session: Session, po: PurchaseOrder, grn_no: str,
 
     One outbox row per GRN (entity_ref=grn_no, action='post_receipt'). The payload
     carries grn_no + po_id (+ bc_po_no when known + the received lines) so the
-    processor can post the receipt and reflect BC's match without re-querying. The
-    partial unique index on (target, action, entity_ref) keeps it to one live row
-    per GRN even under a racing enqueue; the loser reuses the existing row."""
+    processor can post the receipt and reflect BC's match without re-querying.
+    Lines are enriched with sku/bc_item_no because the live BC post maps received
+    quantities onto the BC order's lines by item No. The partial unique index on
+    (target, action, entity_ref) keeps it to one live row per GRN even under a
+    racing enqueue; the loser reuses the existing row."""
     ref = _bc_ref(session, po.id)
+    items = {
+        it.id: it
+        for it in session.exec(
+            select(Item).where(Item.id.in_({ln["item_id"] for ln in received_lines}))
+        ).all()
+    } if received_lines else {}
     payload = {
         "grn_no": grn_no,
         "po_id": po.id,
         "po_number": po.number,
         "bc_po_no": ref.external_id if ref else None,
-        "lines": received_lines,
+        "lines": [{
+            **ln,
+            "sku": items[ln["item_id"]].sku if ln.get("item_id") in items else None,
+            "bc_item_no": items[ln["item_id"]].bc_item_no if ln.get("item_id") in items else None,
+        } for ln in received_lines],
     }
     row = IntegrationOutbox(
         target=OUTBOX_TARGET,

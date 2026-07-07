@@ -130,6 +130,69 @@ def seed_vendors(session: Session) -> int:
     return count
 
 
+def sync_vendors(session: Session) -> int:
+    """Live-mode vendor master sync: upsert Vendor rows by bc_vendor_no from
+    BC's vendor entity (BC owns vendors — CLAUDE.md §2; the app's table is a
+    read-only mirror the PO workflow selects from). Demo mode no-ops: the demo
+    seed (seed_vendors) owns that path. Never deletes — a vendor missing from a
+    partial read must not orphan existing POs."""
+    if bc.use_fakes:
+        return 0
+    rows = bc.list_vendors()
+    by_no = {
+        v.bc_vendor_no: v
+        for v in session.exec(select(Vendor)).all() if v.bc_vendor_no
+    }
+    count = 0
+    for r in rows:
+        vendor = by_no.get(r["bc_vendor_no"])
+        if vendor is None:
+            vendor = Vendor(bc_vendor_no=r["bc_vendor_no"], name=r["name"])
+            by_no[r["bc_vendor_no"]] = vendor
+        vendor.name = r["name"]
+        vendor.email = r.get("email")
+        session.add(vendor)
+        count += 1
+    session.commit()
+    return count
+
+
+def sync_vendor_prices(session: Session) -> int:
+    """Live-mode price-list sync: upsert VendorPrice by (vendor, item) from BC's
+    purchase prices (BC owns price/SKU — CLAUDE.md §2). Rows for vendors/items
+    the app doesn't carry are skipped; run after sync_vendors + sync_items."""
+    if bc.use_fakes:
+        return 0
+    rows = bc.list_vendor_prices()
+    vendors_by_no = {
+        v.bc_vendor_no: v
+        for v in session.exec(select(Vendor)).all() if v.bc_vendor_no
+    }
+    items_by_sku = {it.sku: it for it in session.exec(select(Item)).all()}
+    existing = {
+        (vp.vendor_id, vp.item_id): vp
+        for vp in session.exec(select(VendorPrice)).all()
+    }
+    count = 0
+    for r in rows:
+        vendor = vendors_by_no.get(r.get("vendor_no"))
+        item = items_by_sku.get(r.get("sku"))
+        if vendor is None or item is None:
+            continue
+        vp = existing.get((vendor.id, item.id))
+        if vp is None:
+            vp = VendorPrice(vendor_id=vendor.id, item_id=item.id, price=r["price"])
+            existing[(vendor.id, item.id)] = vp
+        vp.price = r["price"]
+        vp.moq = r.get("moq")
+        if r.get("lead_time_days") is not None:
+            vp.lead_time_days = r["lead_time_days"]
+        session.add(vp)
+        count += 1
+    session.commit()
+    return count
+
+
 def seed_boms(session: Session) -> int:
     """Seed demo BOM headers + lines when no BOM exists yet.
 
@@ -320,6 +383,10 @@ def refresh_all(session: Session) -> int:
     # vendor already exists, or when BC is live). Keeps PO vendor-selection usable
     # out of the box and makes vendors available to the test fixture.
     seed_vendors(session)
+    # Live BC supplies the real vendor master + price list instead (each is a
+    # no-op in demo mode, mirroring how seed_vendors no-ops in live mode).
+    sync_vendors(session)
+    sync_vendor_prices(session)
     # Seed demo BOMs the same way (no-op once any BOM exists / when BC is live) so
     # the explosion service + suggested requisitions work out of the box.
     seed_boms(session)

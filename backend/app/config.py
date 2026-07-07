@@ -31,6 +31,13 @@ class Settings(BaseSettings):
     stock_refresh_seconds: int = 1800            # ~30 min
     seed_demo_on_empty: bool = True              # populate items + stock on first boot
 
+    # Scheduled BC usage import (SOP §9 cadence). The Order Page recomputes live
+    # on every view, but its usage_history input only moves when the BC export is
+    # imported — daily keeps the trailing averages current without waiting for an
+    # officer to press "Import usage from BC". Idempotent (upsert by item+period).
+    usage_import_enabled: bool = True
+    usage_import_seconds: int = 86400            # daily
+
     # Integration outbox processor (retries reliable BC posting; idempotent)
     outbox_process_enabled: bool = True
     outbox_process_seconds: int = 60             # drain pending BC posts ~every minute
@@ -58,6 +65,30 @@ class Settings(BaseSettings):
     # 'Negative Adjmt.' item-journal entries ('Consumption' is unused there but
     # kept so a later switch to production orders needs no config change).
     bc_usage_entry_types: str = "Negative Adjmt.,Consumption"
+    # --- BC live-mode mapping (all standard BC V4 defaults; override per tenant,
+    # no code changes needed — see INTEGRATIONS.md) ---
+    bc_po_lines_entity: str = "PurchaseOrderLines"   # purchase-order lines entity set
+    bc_invoice_entity: str = "PurchInvHeaders"       # posted purchase invoices (3-way match)
+    bc_vendors_entity: str = "Vendors"               # vendor master
+    bc_purchase_prices_entity: str = "Purchase_Prices"  # vendor price list (price/SKU/MOQ)
+    bc_receipt_post_action: str = "Microsoft.NAV.Post"  # bound action that posts the receive
+    # Grade + deckle (SOP §3): name the item-master OData fields if BC carries them
+    # as attributes; when BOTH are blank the adapter parses the item No against the
+    # SKU pattern below (one item per grade+deckle, e.g. 'CWT140-1400').
+    bc_grade_field: str = ""
+    bc_deckle_field: str = ""
+    bc_paper_sku_regex: str = r"^([A-Z]{2,4}\d{2,3})-(\d{3,4})$"
+    # Optional item-master fields (blank = don't read).
+    bc_reorder_point_field: str = "Reorder_Point"
+    bc_lead_time_field: str = "Lead_Time_Calculation"   # dateformula, e.g. '45D'
+    bc_replenishment_field: str = ""   # e.g. 'Replenishment_System'; 'Prod. Order' => FINISHED
+    # Cross-system crosswalk (items.kiwiplan_ref / accura_ref in live mode):
+    #   sku    — the BC item No IS the material code in Kiwiplan/Accura (default)
+    #   fields — read the OData fields named below from the item master
+    #   none   — leave refs unset (per-material stock stays empty until mapped)
+    crosswalk_mode: str = "sku"
+    bc_kiwiplan_ref_field: str = ""
+    bc_accura_ref_field: str = ""
 
     # Kiwiplan (KDW/SQL read, KMC inject) / Accura (ODBC read).
     # *_stock_sql is a parameterized query you supply (see INTEGRATIONS.md) returning

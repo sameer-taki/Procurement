@@ -773,3 +773,88 @@ def test_deleted_forecasts_stay_deleted(client, engine):
         s.commit()
         stock_service.refresh_all(s)
         assert s.exec(select(Forecast)).all() == []   # marker blocks re-seed
+
+
+# --------------------------------------------------------------------------- #
+# Data integrity (SOP §9): roll stock without a grade is surfaced, not swallowed
+# --------------------------------------------------------------------------- #
+def test_order_page_surfaces_ungraded_roll_stock(client, engine):
+    """An item with a deckle but no grade is invisible to the coverage maths
+    ('has a grade' admits an item to planning) — the Order Page must warn."""
+    as_role("VIEWER")
+    assert client.get("/api/planning/order-page").json()["ungraded_roll_skus"] == []
+
+    with Session(engine) as s:
+        s.add(Item(sku="ROLL-NOGRADE-1200", name="Mystery Roll 1200mm",
+                   item_type=ItemType.MATERIAL, uom="KG", deckle_mm=1200))
+        s.commit()
+    page = client.get("/api/planning/order-page").json()
+    assert page["ungraded_roll_skus"] == ["ROLL-NOGRADE-1200"]
+    assert "ROLL-NOGRADE-1200" not in _rows_by_sku(page)   # excluded from planning
+
+
+def test_order_page_ungraded_ignores_inactive(client, engine):
+    with Session(engine) as s:
+        s.add(Item(sku="ROLL-RETIRED-900", name="Retired Roll 900mm",
+                   item_type=ItemType.MATERIAL, uom="KG", deckle_mm=900,
+                   active=False))
+        s.commit()
+    as_role("VIEWER")
+    assert client.get("/api/planning/order-page").json()["ungraded_roll_skus"] == []
+
+
+# --------------------------------------------------------------------------- #
+# Reconciliation (SOP §9): BC paper inventory vs production roll stock
+# --------------------------------------------------------------------------- #
+def test_reconciliation_flags_demo_variance(client):
+    """The demo BC inventory disagrees on RF135-1000 by -760 kg (fakes.py) and
+    agrees everywhere else; the endpoint must flag exactly that grade, sorted
+    first, with everything else inside tolerance."""
+    as_role("VIEWER")
+    recon = client.get("/api/planning/reconciliation").json()
+    assert recon["mode"] == "demo"
+    assert recon["checked"] == 6                     # the six seeded paper grades
+    assert recon["flagged"] == 1
+    first = recon["rows"][0]                          # flagged sorts first
+    assert first["sku"] == "RF135-1000"
+    assert first["flagged"] is True
+    assert first["operational_kg"] == pytest.approx(20000)
+    assert first["bc_kg"] == pytest.approx(19240)
+    assert first["variance_kg"] == pytest.approx(-760)
+    assert first["systems"] == ["KIWIPLAN"]
+    for row in recon["rows"][1:]:
+        assert row["flagged"] is False
+        assert abs(row["variance_kg"]) <= recon["tolerance_kg"]
+
+
+def test_reconciliation_flags_paper_missing_from_bc(client, engine):
+    """A graded roll BC's inventory read doesn't know at all can't be netted —
+    it is flagged with no variance figure rather than silently skipped."""
+    with Session(engine) as s:
+        s.add(Item(sku="TL125-1600", name="Test Liner 125gsm 1600mm",
+                   item_type=ItemType.MATERIAL, uom="KG",
+                   grade="TL125", deckle_mm=1600))
+        s.commit()
+    as_role("VIEWER")
+    recon = client.get("/api/planning/reconciliation").json()
+    rows = {r["sku"]: r for r in recon["rows"]}
+    missing = rows["TL125-1600"]
+    assert missing["flagged"] is True
+    assert missing["bc_kg"] is None
+    assert missing["variance_kg"] is None
+    assert recon["rows"][0]["sku"] == "TL125-1600"   # unreconcilable sorts first
+
+
+def test_reconciliation_requires_auth(client):
+    assert client.get("/api/planning/reconciliation").status_code == 401
+
+
+def test_reconciliation_bc_failure_is_502(client, monkeypatch):
+    from app.domain import planning as svc
+    def boom():
+        raise ConnectionError("BC unreachable")
+    monkeypatch.setattr(svc.bc, "get_inventory", boom)
+    as_role("VIEWER")
+    r = client.get("/api/planning/reconciliation")
+    assert r.status_code == 502
+    assert "BC inventory read failed" in r.json()["detail"]

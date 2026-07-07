@@ -38,6 +38,12 @@ def _outbox_job() -> None:
         purchasing.process_outbox(s)
 
 
+def _usage_import_job() -> None:
+    from .domain import planning
+    with Session(engine) as s:
+        planning.import_usage(s)
+
+
 async def _scheduler() -> None:
     """Periodic stock refresh (~every settings.stock_refresh_seconds)."""
     while True:
@@ -60,6 +66,19 @@ async def _outbox_scheduler() -> None:
             log.exception("scheduled outbox processing failed")
 
 
+async def _usage_import_scheduler() -> None:
+    """Periodic BC usage import (SOP §9 cadence) so the planning run's trailing
+    averages stay current without a manual import. Idempotent upsert; a failed
+    run (BC down, concurrent manual import) just waits for the next tick."""
+    while True:
+        await asyncio.sleep(settings.usage_import_seconds)
+        try:
+            await asyncio.to_thread(_usage_import_job)
+            log.info("scheduled usage import complete")
+        except Exception:  # pragma: no cover - keep the loop alive
+            log.exception("scheduled usage import failed")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _check_secret()
@@ -78,6 +97,8 @@ async def lifespan(app: FastAPI):
         tasks.append(asyncio.create_task(_scheduler()))
     if settings.outbox_process_enabled:
         tasks.append(asyncio.create_task(_outbox_scheduler()))
+    if settings.usage_import_enabled:
+        tasks.append(asyncio.create_task(_usage_import_scheduler()))
     try:
         yield
     finally:
@@ -112,6 +133,8 @@ from .domain import analytics as analytics_routes           # noqa: E402
 from .domain import planning as planning_routes             # noqa: E402
 from .domain import forecasts as forecast_routes            # noqa: E402
 from .domain import shipments as shipment_routes            # noqa: E402
+from .domain import admin as admin_routes                    # noqa: E402
+from .domain import reports as report_routes                 # noqa: E402
 
 app.include_router(auth_router)
 app.include_router(me_router)
@@ -123,6 +146,8 @@ app.include_router(analytics_routes.router)
 app.include_router(planning_routes.router)
 app.include_router(forecast_routes.router)
 app.include_router(shipment_routes.router)
+app.include_router(admin_routes.router)
+app.include_router(report_routes.router)
 
 
 # Serve the built React UI (present in the image at app/static), with SPA fallback
