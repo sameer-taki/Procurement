@@ -346,3 +346,17 @@ def test_company_url_escapes_apostrophe(monkeypatch):
     monkeypatch.setattr(settings, "bc_base_url", "http://bc/ODataV4")
     monkeypatch.setattr(settings, "bc_company", "O'Brien Co")
     assert BCAdapter()._company_url() == "http://bc/ODataV4/Company('O''Brien Co')"
+
+
+def test_list_customers_walks_pages_and_maps(live):
+    live._test_responses["get"] = [
+        {"value": [{"No": "C-1001", "Name": "Fiji Water", "E_Mail": "o@fw"}],
+         "@odata.nextLink": "p2"},
+        {"value": [{"No": "", "Name": "skip"},          # no No -> skipped
+                   {"No": "C-1002", "Name": "Pure Fiji", "E_Mail": None}]},
+    ]
+    out = live.list_customers()
+    assert out == [
+        {"bc_customer_no": "C-1001", "name": "Fiji Water", "email": "o@fw"},
+        {"bc_customer_no": "C-1002", "name": "Pure Fiji", "email": None},
+    ]

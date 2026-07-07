@@ -260,3 +260,44 @@ def test_period_with_trailing_newline_rejected(client):
         "customer": "Fiji Water", "sku": "CTN-FIJIWATER-1L",
         "period": "2026-07\n", "qty_cartons": 100}]})
     assert r.status_code == 400
+
+
+# --------------------------------------------------------------------------- #
+# Customer master (BC-sourced) + forecast picker source
+# --------------------------------------------------------------------------- #
+def test_customers_seeded_and_listed(client):
+    as_role("VIEWER")
+    rows = client.get("/api/customers").json()
+    names = [c["name"] for c in rows]
+    assert "Fiji Water" in names                      # the demo-forecast customer
+    assert all("bc_customer_no" in c and "name" in c for c in rows)
+
+
+def test_customers_query_filter(client):
+    as_role("VIEWER")
+    rows = client.get("/api/customers", params={"q": "fiji"}).json()
+    assert rows and all("fiji" in c["name"].lower() for c in rows)
+
+
+def test_customers_requires_auth(client):
+    assert client.get("/api/customers").status_code == 401
+
+
+def test_sync_customers_upserts_from_bc(engine, monkeypatch):
+    """Live-mode sync upserts by bc_customer_no and never duplicates on re-run."""
+    from app.domain import stock_service
+    from app.gateway.models import Customer
+    monkeypatch.setattr(type(stock_service.bc), "use_fakes", property(lambda self: False))
+    monkeypatch.setattr(stock_service.bc, "list_customers", lambda: [
+        {"bc_customer_no": "C-1001", "name": "Fiji Water Ltd", "email": "a@x"},
+        {"bc_customer_no": "C-9001", "name": "New Co", "email": None},
+    ])
+    with Session(engine) as s:
+        stock_service.sync_customers(s)
+        stock_service.sync_customers(s)          # idempotent
+        by_no = {c.bc_customer_no: c for c in s.exec(select(Customer)).all()}
+        assert by_no["C-1001"].name == "Fiji Water Ltd"   # updated in place
+        assert "C-9001" in by_no                          # new one added
+        # No duplicate rows for C-1001 after two syncs.
+        dupes = [c for c in s.exec(select(Customer)).all() if c.bc_customer_no == "C-1001"]
+        assert len(dupes) == 1

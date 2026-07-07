@@ -17,7 +17,7 @@ from sqlmodel import Session, select
 
 from ..auth.deps import CurrentUser, get_current_user
 from ..db import get_session
-from ..gateway.models import Forecast, Item
+from ..gateway.models import Customer, Forecast, Item
 
 router = APIRouter(prefix="/api", tags=["forecasts"])
 
@@ -67,6 +67,25 @@ def _out(f: Forecast, item: Optional[Item]) -> dict:
         "updated_by": f.updated_by,
         "updated_at": f.updated_at.isoformat(),
     }
+
+
+@router.get("/customers")
+def list_customers(
+    q: Optional[str] = Query(None),
+    limit: int = Query(50, ge=1, le=200),
+    session: Session = Depends(get_session),
+    _: CurrentUser = Depends(get_current_user),
+):
+    """The BC-sourced customer master, for the forecast picker. Optional `q`
+    filters by name (case-insensitive substring); active customers only."""
+    stmt = select(Customer).where(Customer.active == True)  # noqa: E712
+    if q:
+        stmt = stmt.where(Customer.name.ilike(f"%{q}%"))
+    rows = session.exec(stmt.order_by(Customer.name).limit(limit)).all()
+    return [
+        {"bc_customer_no": c.bc_customer_no, "name": c.name, "email": c.email}
+        for c in rows
+    ]
 
 
 @router.get("/forecasts")
