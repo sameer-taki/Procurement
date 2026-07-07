@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { api } from '../api.js'
 import { useAuth } from '../auth.jsx'
@@ -12,13 +12,20 @@ export default function StockDetail() {
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
 
-  const load = useCallback(() => {
+  // Clear the error on SKU change and guard the async callback so a slow
+  // response for a previous SKU can't cross-paint onto the new one.
+  useEffect(() => {
+    let live = true
+    setError('')
     api.get(`/api/stock/${encodeURIComponent(sku)}`)
-      .then(setV)
-      .catch((e) => (e.status === 401 ? setUser(null) : setError(e.message)))
+      .then((d) => { if (live) setV(d) })
+      .catch((e) => {
+        if (!live) return
+        if (e.status === 401) setUser(null)
+        else setError(e.message)
+      })
+    return () => { live = false }
   }, [sku, setUser])
-
-  useEffect(load, [load])
 
   async function refresh() {
     setBusy(true)
@@ -196,7 +203,7 @@ function BoardGradeSpec({ sku }) {
           )}
 
           {canEdit && editing && (
-            <SpecEditor sku={sku} components={components} yieldQtyInit={bom?.yield_qty} onSaved={onSaved} setUser={setUser} />
+            <SpecEditor sku={sku} components={components} yieldQtyInit={bom?.yield_qty} versionInit={bom?.version} onSaved={onSaved} setUser={setUser} />
           )}
         </>
       )}
@@ -227,10 +234,14 @@ function SpecRows({ nodes, depth }) {
 // component lines; PUT /api/items/:sku/bom versions the bill (old ACTIVE ->
 // OBSOLETE) and returns the new tree. Scrap is entered as a percentage here;
 // the API takes a 0..1 fraction.
-function SpecEditor({ sku, components, yieldQtyInit, onSaved, setUser }) {
+function SpecEditor({ sku, components, yieldQtyInit, versionInit, onSaved, setUser }) {
   const [yieldQty, setYieldQty] = useState(() => (
     Number(yieldQtyInit) > 0 ? String(yieldQtyInit) : '1'
   ))
+  // Capture the active bill's version when the editor opens; send it back as
+  // base_version so the PUT 409s (optimistic concurrency) if another officer
+  // has saved a new version since. 0 = no active bill when we opened.
+  const [baseVersion] = useState(() => Number(versionInit) || 0)
   const [lines, setLines] = useState(() => components.map((c) => ({
     sku: c.sku,
     name: c.name,
@@ -288,16 +299,21 @@ function SpecEditor({ sku, components, yieldQtyInit, onSaved, setUser }) {
     try {
       const body = {
         yield_qty: Number(yieldQty),
+        base_version: baseVersion,
         lines: lines.map((l) => ({
           sku: l.sku,
           qty_per: Number(l.qty_per),
           scrap_pct: Number(l.scrap_pct || 0) / 100,
         })),
       }
+      // On success onSaved() closes the editor; on any error we fall to the
+      // catch (editor stays open) — including a 409 "Spec changed since you
+      // opened it…" so the officer can read it and reload.
       onSaved(await api.put(`/api/items/${encodeURIComponent(sku)}/bom`, body))
     } catch (err) {
       if (err.status === 401) setUser(null)
-      // 404 unknown component / 400 duplicate-or-own-parent / 409 mirrored or cycle
+      // 404 unknown component / 400 duplicate-or-own-parent / 409 mirrored,
+      // cycle, or stale base_version (another officer saved since we opened)
       else setError(err.message)
     } finally {
       setBusy(false)

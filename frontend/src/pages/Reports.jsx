@@ -22,6 +22,31 @@ export default function Reports() {
 
   useEffect(load, [load])
 
+  // Download through fetch, not a bare <a download>: a raw href silently saves
+  // a JSON error body as *.csv when the session has expired. Mirror the blob
+  // idiom in PaperPlanning's exportCsv, bouncing on 401 like every other page.
+  async function downloadCsv(report) {
+    setError('')
+    try {
+      const res = await fetch(csvHref(report.path), { credentials: 'include' })
+      if (!res.ok) {
+        if (res.status === 401) { setUser(null); return }
+        throw new Error(`Could not download ${report.title} (${res.status}).`)
+      }
+      const blob = await res.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `${report.key}.csv`
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      URL.revokeObjectURL(url)
+    } catch (e) {
+      setError(e.message)
+    }
+  }
+
   return (
     <div>
       <div className="page-head">
@@ -39,9 +64,9 @@ export default function Reports() {
                 <h2 style={{ margin: 0 }}>{report.title}</h2>
                 <span className="muted small">{report.description}</span>
               </div>
-              <a className="btn nowrap" href={csvHref(report.path)} download>
+              <button className="btn nowrap" type="button" onClick={() => downloadCsv(report)}>
                 Download CSV{res ? ` (${num(res.count)} rows)` : ''}
-              </a>
+              </button>
             </div>
             {!res ? (
               <p className="muted">Loading…</p>

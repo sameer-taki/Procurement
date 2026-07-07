@@ -70,7 +70,7 @@ export default function Forecasts() {
       </div>
 
       {canPlan && <ForecastForm onSaved={onSaved} setUser={setUser} />}
-      {canPlan && <ImportCard onImported={onImported} setUser={setUser} />}
+      {canPlan && <ImportCard onImported={onImported} onReload={load} setUser={setUser} />}
 
       <div className="filters">
         <input
@@ -271,7 +271,7 @@ function ForecastForm({ onSaved, setUser }) {
 // box above) or [customer, sku, month, cartons], tab/comma/semicolon separated.
 // Parsing is pure (parseForecastPaste); the preview shows exactly what will be
 // written before the PUT, chunked under the backend's 1000-line cap.
-function ImportCard({ onImported, setUser }) {
+function ImportCard({ onImported, onReload, setUser }) {
   const [defaultCustomer, setDefaultCustomer] = useState('')
   const [text, setText] = useState('')
   const [error, setError] = useState('')
@@ -285,8 +285,11 @@ function ImportCard({ onImported, setUser }) {
     setError('')
     if (parsed.lines.length === 0) { setError('Nothing to import — paste at least one valid row.'); return }
     setBusy(true)
+    // Track lines committed across successful chunks: a PUT overwrites by
+    // customer+sku+period, so earlier chunks are already durable when a later
+    // one fails. Surface that (and reload) rather than hiding the partial save.
+    let written = 0
     try {
-      let written = 0
       for (let i = 0; i < parsed.lines.length; i += 1000) {
         const chunk = parsed.lines.slice(i, i + 1000)
         const res = await api.put('/api/forecasts', { lines: chunk })
@@ -296,7 +299,11 @@ function ImportCard({ onImported, setUser }) {
       onImported(written, parsed.skipped)
     } catch (err) {
       if (err.status === 401) setUser(null)
-      else setError(err.message) // 404 "unknown sku" surfaces as-is
+      else if (written > 0) {
+        // 404 "unknown sku" (etc.) surfaces as-is, with the partial-commit note.
+        setError(`${err.message} — ${num(written)} line(s) from earlier chunks were already saved; fix the flagged row and re-import (re-saving overwrites, so it's safe).`)
+        onReload() // reload so the already-saved rows show
+      } else setError(err.message) // 404 "unknown sku" surfaces as-is
     } finally {
       setBusy(false)
     }
