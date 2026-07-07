@@ -37,8 +37,11 @@ services:
       BC_INVOICE_ENTITY: "${BC_INVOICE_ENTITY:-PurchInvHeaders}"
       BC_USAGE_ENTITY: "${BC_USAGE_ENTITY:-ItemLedgerEntries}"
       BC_VENDORS_ENTITY: "${BC_VENDORS_ENTITY:-Vendors}"
+      BC_CUSTOMERS_ENTITY: "${BC_CUSTOMERS_ENTITY:-Customers}"
       BC_PURCHASE_PRICES_ENTITY: "${BC_PURCHASE_PRICES_ENTITY:-Purchase_Prices}"
       BC_RECEIPT_POST_ACTION: "${BC_RECEIPT_POST_ACTION:-Microsoft.NAV.Post}"
+      # Exactly-once receipt posting correlation field (blank = best-effort; see INTEGRATIONS.md)
+      BC_RECEIPT_CORRELATION_FIELD: "${BC_RECEIPT_CORRELATION_FIELD:-}"
       # BC paper-planning mapping (usage entry types, grade/deckle, crosswalk)
       BC_USAGE_ENTRY_TYPES: "${BC_USAGE_ENTRY_TYPES:-Negative Adjmt.,Consumption}"
       BC_GRADE_FIELD: "${BC_GRADE_FIELD:-}"

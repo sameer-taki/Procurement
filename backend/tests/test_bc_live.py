@@ -247,6 +247,42 @@ def test_post_receipt_readback_failure_falls_back_deterministically(live):
     assert live.post_receipt(RECEIPT_PAYLOAD) == "BC-RCPT-GRN-0001"
 
 
+def test_post_receipt_exactly_once_skips_when_already_posted(live, monkeypatch):
+    """With BC_RECEIPT_CORRELATION_FIELD set, a retry after a lost Post response
+    finds the receipt already carrying this grn_no and re-posts NOTHING."""
+    monkeypatch.setattr(settings, "bc_receipt_correlation_field", "Vendor_Shipment_No")
+    live._test_responses["get"] = [
+        {"value": [{"No": "107001"}]},   # step 0: a posted receipt already has this grn
+    ]
+    assert live.post_receipt(RECEIPT_PAYLOAD) == "107001"
+    # No writes at all — the whole point of exactly-once on retry.
+    assert [c for c in live._test_calls if c["method"] in ("patch", "post")] == []
+    assert "Vendor_Shipment_No eq 'GRN-0001'" in live._test_calls[0]["params"]["$filter"]
+
+
+def test_post_receipt_stamps_correlation_then_reads_back_by_grn(live, monkeypatch):
+    """First-time post with the correlation field set: stamp grn_no on the order
+    header (so the receipt inherits it), receive, then read the receipt back by
+    grn_no — exact even with several GRNs on one PO."""
+    monkeypatch.setattr(settings, "bc_receipt_correlation_field", "Vendor_Shipment_No")
+    live._test_responses["get"] = [
+        {"value": []},                                            # step 0: not yet posted
+        {"value": [{"No": "CWT140-1400", "Line_No": 10000}]},     # order lines
+        {"value": [{"No": "107007"}]},                            # readback by grn_no
+    ]
+    assert live.post_receipt(RECEIPT_PAYLOAD) == "107007"
+
+    patches = [c for c in live._test_calls if c["method"] == "patch"]
+    # First write stamps the correlation field on the ORDER HEADER, before qty.
+    assert patches[0]["body"] == {"Vendor_Shipment_No": "GRN-0001"}
+    assert patches[0]["url"].endswith("PurchaseOrders('106001')")
+    assert patches[0]["if_match"] == "*"
+    assert patches[1]["body"] == {"Qty_to_Receive": 30000}
+
+    posts = [c for c in live._test_calls if c["method"] == "post"]
+    assert posts[0]["url"].endswith("PurchaseOrders('106001')/Microsoft.NAV.Post")
+
+
 # --------------------------------------------------------------------------- #
 # 3-way match: a posted purchase invoice IS the matched signal
 # --------------------------------------------------------------------------- #
