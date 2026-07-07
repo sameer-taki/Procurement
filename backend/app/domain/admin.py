@@ -265,6 +265,7 @@ def retry_outbox_row(
         )
     row.status = "PENDING"
     row.attempts = 0
+    row.next_attempt_at = None      # clear any backoff so it retries immediately
     session.add(row)
     _audit(session, entity_kind=SYSTEM_ENTITY_KIND, entity_id=f"outbox:{row.id}",
            event_type="OUTBOX_RETRIED", actor=admin.email,

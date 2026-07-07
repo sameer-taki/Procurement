@@ -285,6 +285,10 @@ class IntegrationOutbox(SQLModel, table=True):
     # processor reclaims it to PENDING so the work resumes (double-posting is
     # still impossible — the ExternalRef anchor makes a re-post a no-op).
     claimed_at: Optional[datetime] = None
+    # Earliest time a failed row may be retried. Exponential backoff writes this
+    # so a multi-hour BC outage no longer burns all attempts in ~5 minutes; the
+    # processor skips rows whose next_attempt_at is still in the future.
+    next_attempt_at: Optional[datetime] = None
 
 
 class OrderEvent(SQLModel, table=True):

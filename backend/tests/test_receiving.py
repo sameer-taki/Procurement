@@ -285,10 +285,15 @@ def test_failing_receipt_post_retries_then_succeeds(client, engine, monkeypatch)
             ExternalRef.entity_id == grn)).all()
         assert refs == []                    # no crosswalk on failure
 
-    # Recover on the retry.
+    # Recover on the retry, once the backoff window has elapsed.
     monkeypatch.undo()
     monkeypatch.setattr(purchasing.settings, "outbox_process_on_issue", False,
                         raising=False)
+    with Session(engine) as s:
+        for r in s.exec(select(IntegrationOutbox)).all():
+            r.next_attempt_at = None
+            s.add(r)
+        s.commit()
     with Session(engine) as s:
         purchasing.process_outbox(s)
     with Session(engine) as s:

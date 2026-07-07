@@ -24,7 +24,9 @@ from sqlmodel import Session, select
 
 from ..auth.deps import CurrentUser, get_current_user
 from ..db import get_session
-from ..gateway.models import Item, OrderEvent, Requisition, RequisitionLine, VendorPrice
+from ..gateway.models import (
+    Item, OrderEvent, PurchaseOrder, Requisition, RequisitionLine, VendorPrice,
+)
 from .approvals import APPROVER_ROLES, can_approve, required_tier
 
 router = APIRouter(prefix="/api", tags=["requisitions"])
@@ -520,6 +522,14 @@ def reject_requisition(
     return _detail(session, req)
 
 
+def _existing_pos_for_req(session: Session, req_id: str) -> bool:
+    """True iff any PurchaseOrder was created from this requisition (used to gate
+    the APPROVED->CANCELLED exit; local to avoid importing purchasing)."""
+    return session.exec(
+        select(PurchaseOrder).where(PurchaseOrder.requisition_id == req_id)
+    ).first() is not None
+
+
 @router.post("/requisitions/{req_id}/cancel")
 def cancel_requisition(
     req_id: str,
@@ -528,7 +538,15 @@ def cancel_requisition(
 ):
     _require_editor(user)
     req = _get_req(session, req_id)
-    if req.status not in CANCELLABLE:
+    # An APPROVED requisition can still be cancelled IFF no PO has been created
+    # from it yet — otherwise it is a dead end: OPEN_REQ_STATES (planning) counts
+    # APPROVED as "in flight" and blocks the next coverage run, while create-po
+    # would be the only exit. Once POs exist, cancel the POs instead.
+    approved_no_pos = (
+        req.status == "APPROVED"
+        and not _existing_pos_for_req(session, req.id)
+    )
+    if req.status not in CANCELLABLE and not approved_no_pos:
         raise _bad_transition(req.status, "cancel")
     # Cancellation is the requester's own action (or ADMIN).
     if user.role_code != "ADMIN" and req.requester != user.email:

@@ -370,12 +370,16 @@ class BCAdapter:
                 for x in data.get("value", []):
                     sku = x.get(F_PP_ITEM)
                     vendor_no = x.get(F_PP_VENDOR)
-                    if not sku or not vendor_no:
+                    price = float(x.get(F_PP_COST) or 0)
+                    # A missing/zero Direct_Unit_Cost means 'not set' in BC (same
+                    # convention as reorder point). Skip it — a synced 0.0 would
+                    # win cheapest-vendor selection and post a free-of-charge PO.
+                    if not sku or not vendor_no or price <= 0:
                         continue
                     out.append({
                         "sku": sku,
                         "vendor_no": vendor_no,
-                        "price": float(x.get(F_PP_COST) or 0),
+                        "price": price,
                         "moq": float(x.get(F_PP_MOQ)) if x.get(F_PP_MOQ) else None,
                         "lead_time_days": None,
                     })
