@@ -41,6 +41,7 @@ from ..gateway.bom import (
 from ..gateway.models import (
     BomHeader,
     BomLine,
+    BomOwner,
     Item,
     OrderEvent,
     Requisition,
@@ -409,6 +410,164 @@ def suggest_requisition(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         detail="Could not allocate a unique requisition number",
     ) from last_error
+
+
+# --------------------------------------------------------------------------- #
+# BOM CRUD — the board-grade spec (SOP step 2's master data)
+# --------------------------------------------------------------------------- #
+# The app owns the top "kit" level of cross-system BOMs (CLAUDE.md §2): the
+# carton -> KG-per-grade spec the forecast explosion runs through. Only
+# APP-owned bills are writable here; bills mirrored from Kiwiplan/Accura are
+# production truth and stay read-only. Upserts are VERSIONED: the previous
+# ACTIVE header is marked OBSOLETE (never deleted), so an audit can always
+# reconstruct what spec a past planning run used.
+
+class BomLineIn(BaseModel):
+    sku: str
+    # qty per 1 unit of the parent (KG of grade per carton for paper specs).
+    qty_per: float = Field(gt=0, allow_inf_nan=False)
+    # trim/corr-out factors fold in here: 0.04 == 4% over the net weight.
+    scrap_pct: float = Field(default=0.0, ge=0, le=1, allow_inf_nan=False)
+
+
+class BomIn(BaseModel):
+    yield_qty: float = Field(default=1.0, gt=0, allow_inf_nan=False)
+    lines: list[BomLineIn] = Field(min_length=1, max_length=100)
+
+
+BOM_ENTITY_KIND = "BOM"
+
+
+def _require_app_owned(header: Optional[BomHeader], action: str) -> None:
+    if header is not None and header.owner != BomOwner.APP:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"Cannot {action}: this bill is mirrored read-only from "
+                f"{header.owner.value} (production owns material BOMs)"
+            ),
+        )
+
+
+def upsert_bom(session: Session, user: CurrentUser, item: Item,
+               body: BomIn) -> dict:
+    """Replace the item's APP-owned bill with a new ACTIVE version.
+
+    Validates every component exists and differs from the parent, then proves
+    the NEW structure explodes without a cycle before committing (overlay the
+    candidate lines on the current bom_of). The previous ACTIVE header becomes
+    OBSOLETE in the same transaction; an OrderEvent records the change."""
+    current = _active_header(session, item.id)
+    _require_app_owned(current, "edit")
+
+    # Resolve + validate components against the catalog.
+    lines: list[dict] = []
+    seen: set = set()
+    for ln in body.lines:
+        component = _item_for_sku(session, ln.sku)
+        if component.id == item.id:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                                detail="A bill cannot contain its own parent")
+        if component.id in seen:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                                detail=f"Duplicate component: {ln.sku}")
+        seen.add(component.id)
+        lines.append({"component_id": component.id, "sku": component.sku,
+                      "qty_per": ln.qty_per, "scrap_pct": ln.scrap_pct})
+
+    # Cycle check on the CANDIDATE structure: overlay the new lines for this
+    # parent onto the existing bom_of and explode one unit.
+    base_bom_of = make_bom_of(session)
+    candidate_nodes = [
+        BomNode(component=ln["component_id"], qty_per=ln["qty_per"],
+                scrap_pct=ln["scrap_pct"])
+        for ln in lines
+    ]
+
+    def _candidate_bom_of(item_id: str):
+        if item_id == item.id:
+            return (body.yield_qty, candidate_nodes)
+        return base_bom_of(item_id)
+
+    try:
+        explode(item.id, 1.0, _candidate_bom_of)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
+
+    version = 1
+    if current is not None:
+        current.status = "OBSOLETE"
+        session.add(current)
+        version = current.version + 1
+    header = BomHeader(
+        parent_item_id=item.id,
+        version=version,
+        status="ACTIVE",
+        owner=BomOwner.APP,
+        yield_qty=body.yield_qty,
+    )
+    session.add(header)
+    session.flush()
+    for i, ln in enumerate(lines, start=1):
+        component = session.get(Item, ln["component_id"])
+        session.add(BomLine(
+            bom_header_id=header.id, line_no=i, component_id=ln["component_id"],
+            qty_per=ln["qty_per"], uom=component.uom if component else "EA",
+            scrap_pct=ln["scrap_pct"],
+        ))
+    session.add(OrderEvent(
+        entity_kind=BOM_ENTITY_KIND, entity_id=item.id,
+        from_status=f"v{current.version}" if current else None,
+        to_status=f"v{version}",
+        event_type="BOM_UPDATED", actor=user.email,
+        detail_json=req_service.json.dumps({
+            "sku": item.sku, "version": version, "yield_qty": body.yield_qty,
+            "lines": [{"sku": ln["sku"], "qty_per": ln["qty_per"],
+                       "scrap_pct": ln["scrap_pct"]} for ln in lines],
+        }),
+    ))
+    session.commit()
+    return _bom_tree(session, item)
+
+
+@router.put("/items/{sku}/bom")
+def put_item_bom(
+    sku: str,
+    body: BomIn,
+    session: Session = Depends(get_session),
+    user: CurrentUser = Depends(get_current_user),
+):
+    _require_suggest(user)          # same OFFICER/ADMIN gate as the other mutators
+    item = _item_for_sku(session, sku)
+    return upsert_bom(session, user, item, body)
+
+
+@router.delete("/items/{sku}/bom", status_code=status.HTTP_204_NO_CONTENT)
+def delete_item_bom(
+    sku: str,
+    session: Session = Depends(get_session),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Retire the APP-owned bill (mark OBSOLETE — versions are never deleted,
+    the audit trail must be able to reconstruct past planning runs)."""
+    _require_suggest(user)
+    item = _item_for_sku(session, sku)
+    header = _active_header(session, item.id)
+    if header is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail=f"{sku} has no active bill")
+    _require_app_owned(header, "delete")
+    header.status = "OBSOLETE"
+    session.add(header)
+    session.add(OrderEvent(
+        entity_kind=BOM_ENTITY_KIND, entity_id=item.id,
+        from_status=f"v{header.version}", to_status=None,
+        event_type="BOM_RETIRED", actor=user.email,
+        detail_json=req_service.json.dumps({"sku": item.sku,
+                                            "version": header.version}),
+    ))
+    session.commit()
+    return None
 
 
 # --------------------------------------------------------------------------- #
