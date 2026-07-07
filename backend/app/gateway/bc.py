@@ -110,28 +110,31 @@ class BCAdapter:
         Demo data until BC is wired.
 
         Live mode reads the item-ledger OData entity (settings.bc_usage_entity)
-        filtered to consumption entries since the window start and aggregates
-        client-side by item + posting month. Quantities are SUMMED SIGNED per
-        month, then flipped: consumption posts negative and a reversal /
-        correction posts positive, so netting (not abs-per-entry) keeps a
-        corrected posting from inflating usage. Standard BC V4 field names are
-        assumed (Item_No / Posting_Date / Quantity); confirm the entity name +
-        which Entry_Type values represent Kiwiplan-fed usage for this tenant
-        (CLAUDE.md §7) before going live.
+        filtered to the usage Entry_Type values (settings.bc_usage_entry_types)
+        since the window start and aggregates client-side by item + posting
+        month. Quantities are SUMMED SIGNED per month, then flipped: usage posts
+        negative and a reversal / correction posts positive, so netting (not
+        abs-per-entry) keeps a corrected posting from inflating usage.
+
+        Verified against GML's BC14 (instance BC140): ItemLedgerEntries is
+        published as a QUERY-object web service ($filter/$select/$top fine, no
+        $orderby — which this never uses), field names are Item_No /
+        Posting_Date ('YYYY-MM-DD') / Quantity / Entry_Type, and Kiwiplan job
+        consumption posts as 'Negative Adjmt.'.
         """
         if self.use_fakes:
             return fakes.usage_entries()
 
         from .planning import trailing_periods
         window_start = trailing_periods(months)[0] + "-01"
+        entry_types = [
+            t.strip() for t in settings.bc_usage_entry_types.split(",") if t.strip()
+        ]
+        type_filter = " or ".join(f"Entry_Type eq '{t}'" for t in entry_types)
         url = f"{self._company_url()}/{settings.bc_usage_entity}"
         by_item_month: dict[tuple, float] = {}
         params = {
-            # TODO: confirm the Entry_Type filter value(s) for this tenant.
-            "$filter": (
-                "Entry_Type eq 'Consumption' "
-                f"and Posting_Date ge {window_start}"
-            ),
+            "$filter": f"({type_filter}) and Posting_Date ge {window_start}",
             "$select": "Item_No,Posting_Date,Quantity",
         }
         while url:

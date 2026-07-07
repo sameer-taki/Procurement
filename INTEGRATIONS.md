@@ -55,24 +55,31 @@ item to its Kiwiplan/Accura material id (see note below).
 
 ### Paper planning: the usage export + grade/deckle
 
-The Order Page (paper planning per the procurement SOP) needs two more reads:
+The Order Page (paper planning per the procurement SOP) needs two more reads.
+**Verified against GML's live test server (bc-test.gml.com.fj = 172.16.1.10,
+BC14 on-prem, instance `BC140`, http on 7048):**
 
 | Env var | Value |
 |---------|-------|
-| `BC_USAGE_ENTITY` | usage-export entity set (default `ItemLedgerEntries`) |
+| `BC_BASE_URL` | `http://172.16.1.10:7048/BC140/ODataV4` (test box; prod TBD) |
+| `BC_COMPANY` | `Golden Manufacturers Pte Ltd` |
+| `BC_AUTH` | `ntlm` (domain accounts, `GML\<user>`) |
+| `BC_USAGE_ENTITY` | `ItemLedgerEntries` — already published (as a Query object) |
+| `BC_USAGE_ENTRY_TYPES` | default `Negative Adjmt.,Consumption` — Kiwiplan job usage posts as **Negative Adjmt.**; 'Consumption' returned nothing on this tenant |
 
 * **Usage (SOP step 3):** `BCAdapter.get_usage_entries` reads the item ledger
-  filtered to consumption (`Entry_Type eq 'Consumption'` — the postings Kiwiplan
-  feeds back) and aggregates client-side to KG per item per month, upserted into
-  `usage_history` via `POST /api/planning/import-usage`. **Confirm:** the entity
-  name, the `Entry_Type` values that represent Kiwiplan job usage, and the field
-  names `Item_No` / `Posting_Date` / `Quantity`.
-* **Grade + deckle:** stock is planned by grade AND deckle (roll width). The
-  adapter maps both to `items.grade` / `items.deckle_mm`, currently `None` in live
-  mode. **Confirm:** where the BC item master carries them (item attributes, a
-  category, or the item-number convention) so `_map_item` can be finished. Demo
-  data keys one item per grade+deckle (`CWT140-1400`), matching the SOP's
-  "stock is tracked by grade AND deckle".
+  filtered to those entry types since the trailing window start and aggregates
+  to KG per item per month (`POST /api/planning/import-usage`). Field names
+  confirmed on BC140: `Item_No` / `Posting_Date` ('YYYY-MM-DD') / `Quantity`
+  (signed) / `Entry_Type`. The service is a QUERY object: `$filter`/`$select`/
+  `$top` work, `$orderby` does not (the adapter never uses it).
+* **Item master:** on-prem BC only exposes published services — publish
+  **Page 31 as service name `Items`** (Web Services page in the client).
+* **Grade + deckle:** BC item numbers ARE the grade (`WTL175`, `BX186`) — one
+  item per grade, no deckle in the item number. Where deckle lives (lot no. /
+  variant / Kiwiplan-only) is still to be confirmed before `_map_item` fills
+  `items.deckle_mm`; grade can map from the item no. / category once the paper
+  category code is known.
 
 ---
 

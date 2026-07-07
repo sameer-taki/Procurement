@@ -52,7 +52,12 @@ class Settings(BaseSettings):
     bc_items_entity: str = "Items"     # OData entity set for the item master (confirm name)
     bc_po_entity: str = "PurchaseOrders"  # OData entity set for purchase orders (confirm name)
     bc_receipt_entity: str = "PurchRcptHeaders"  # OData entity for posted receipts (confirm name)
-    bc_usage_entity: str = "ItemLedgerEntries"   # OData entity for the usage export (confirm name)
+    bc_usage_entity: str = "ItemLedgerEntries"   # OData entity for the usage export
+    # Which item-ledger Entry_Type values count as paper usage, comma-separated.
+    # Confirmed on GML's BC14 (bc-test): Kiwiplan job consumption posts as
+    # 'Negative Adjmt.' item-journal entries ('Consumption' is unused there but
+    # kept so a later switch to production orders needs no config change).
+    bc_usage_entry_types: str = "Negative Adjmt.,Consumption"
 
     # Kiwiplan (KDW/SQL read, KMC inject) / Accura (ODBC read).
     # *_stock_sql is a parameterized query you supply (see INTEGRATIONS.md) returning

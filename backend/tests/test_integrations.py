@@ -52,3 +52,44 @@ def BC_live(monkeypatch, pages, start_url):
     monkeypatch.setattr(settings, "bc_items_entity", start_url)  # first url == "u1"
     monkeypatch.setattr(adapter, "_get", lambda url, params=None: pages[url.lstrip("/")])
     return adapter
+
+
+def test_bc_usage_entries_live_filter_and_signed_netting(monkeypatch):
+    """The live usage read (verified against GML's BC140):
+    * $filter carries every configured Entry_Type (Kiwiplan usage posts as
+      'Negative Adjmt.'; 'Consumption' kept for a later switch) AND the
+      trailing-window date bound;
+    * quantities are netted SIGNED per (item, month) then flipped, so a
+      reversal (+2000) offsets its posting instead of adding to usage;
+    * a month whose corrections outweigh usage clamps to zero."""
+    captured = {}
+
+    def _get(url, params=None):
+        if params is not None:
+            captured.update(params)
+        return {"value": [
+            {"Item_No": "WTL175", "Posting_Date": "2026-06-05", "Quantity": -2444},
+            {"Item_No": "WTL175", "Posting_Date": "2026-06-09", "Quantity": -2440},
+            {"Item_No": "WTL175", "Posting_Date": "2026-06-20", "Quantity": 2000},
+            {"Item_No": "BX186", "Posting_Date": "2026-05-02", "Quantity": -459},
+            {"Item_No": "BX186", "Posting_Date": "2026-04-01", "Quantity": 500},
+        ]}
+
+    monkeypatch.setattr(settings, "use_fake_adapters", False)
+    monkeypatch.setattr(settings, "bc_base_url", "http://bc")
+    monkeypatch.setattr(settings, "bc_username", "u")
+    monkeypatch.setattr(settings, "bc_password", "p")
+    adapter = bc.BCAdapter()
+    monkeypatch.setattr(adapter, "_company_url", lambda: "")
+    monkeypatch.setattr(adapter, "_get", _get)
+
+    rows = adapter.get_usage_entries()
+    flt = captured["$filter"]
+    assert "Entry_Type eq 'Negative Adjmt.'" in flt
+    assert "Entry_Type eq 'Consumption'" in flt
+    assert "Posting_Date ge " in flt
+
+    by_key = {(r["sku"], r["period"]): r["quantity"] for r in rows}
+    assert by_key[("WTL175", "2026-06")] == 2444 + 2440 - 2000   # reversal nets off
+    assert by_key[("BX186", "2026-05")] == 459
+    assert by_key[("BX186", "2026-04")] == 0                     # clamps, never negative
