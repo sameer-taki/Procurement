@@ -92,7 +92,7 @@ class BCAdapter:
         if params:
             p.update(params)
         caller = session or requests
-        kwargs = {"params": p, "timeout": 30}
+        kwargs = {"params": p, "timeout": settings.bc_timeout_seconds}
         if session is None:                 # one-off call: auth + verify per request
             kwargs["auth"] = self._auth()
             kwargs["verify"] = settings.bc_verify_tls
@@ -110,7 +110,7 @@ class BCAdapter:
             headers["If-Match"] = if_match
         caller = session or requests
         kwargs = {"json": body or {}, "params": {"$format": "json"},
-                  "headers": headers, "timeout": 30}
+                  "headers": headers, "timeout": settings.bc_timeout_seconds}
         if session is None:
             kwargs["auth"] = self._auth()
             kwargs["verify"] = settings.bc_verify_tls
@@ -199,19 +199,59 @@ class BCAdapter:
             "deckle_mm": deckle,
         }
 
+    @staticmethod
+    def _item_select_fields() -> list[str]:
+        """The item-master columns the adapter actually maps. Explicit so BC does
+        NOT compute the Inventory flowfield for every row (the usual cause of a
+        slow/timed-out items read) and payloads stay small. Optional attribute
+        fields are included only when configured."""
+        fields = [F_NO, F_NAME, F_UOM, F_PRICE]
+        optional = [
+            settings.bc_reorder_point_field, settings.bc_lead_time_field,
+            settings.bc_replenishment_field, settings.bc_grade_field,
+            settings.bc_deckle_field,
+        ]
+        if settings.crosswalk_mode == "fields":
+            optional += [settings.bc_kiwiplan_ref_field, settings.bc_accura_ref_field]
+        for f in optional:
+            if f and f not in fields:
+                fields.append(f)
+        return fields
+
     # READS
     def list_items(self) -> list[dict]:
-        """Item master (incl. price). Follows OData @odata.nextLink pagination."""
+        """Item master (incl. price). Follows OData @odata.nextLink pagination.
+
+        Uses $select (see _item_select_fields) so BC skips the Inventory flowfield
+        — without it the items read recomputes inventory per row and times out on
+        a busy tenant. If a selected field isn't exposed on the item page BC 400s;
+        we retry once with the core fields only so a stray optional field (e.g. a
+        Reorder_Point not on the list page) degrades gracefully instead of failing
+        the whole sync."""
         if self.use_fakes:
             return fakes.list_items()
-        url = f"{self._company_url()}/{settings.bc_items_entity}"
-        out: list[dict] = []
-        with self._session() as s:
-            while url:
-                data = self._get(url, session=s)
-                out.extend(self._map_item(x) for x in data.get("value", []))
-                url = data.get("@odata.nextLink")
-        return out
+        base = f"{self._company_url()}/{settings.bc_items_entity}"
+
+        def fetch(select_fields: list[str]) -> list[dict]:
+            out: list[dict] = []
+            with self._session() as s:
+                url, params = base, {"$select": ",".join(select_fields)}
+                while url:
+                    data = self._get(url, params, session=s)
+                    out.extend(self._map_item(x) for x in data.get("value", []))
+                    url = data.get("@odata.nextLink")
+                    params = None            # nextLink already carries the query
+            return out
+
+        try:
+            return fetch(self._item_select_fields())
+        except Exception as exc:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            if status != 400:
+                raise
+            # A configured optional field isn't on the item page — fall back to the
+            # core columns so the sync still succeeds (attributes just come back unset).
+            return fetch([F_NO, F_NAME, F_UOM, F_PRICE])
 
     def get_item_price(self, sku: str) -> Optional[float]:
         """Unit price for one SKU (BC item No). Demo data until BC is wired."""

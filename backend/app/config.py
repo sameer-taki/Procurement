@@ -60,6 +60,11 @@ class Settings(BaseSettings):
     bc_password: str = ""
     bc_auth: str = "ntlm"              # "ntlm" | "basic"
     bc_verify_tls: bool = True         # set false only for a self-signed on-prem cert
+    # Per-request read/connect timeout (seconds). Item-master reads over NTLM on a
+    # busy on-prem BC can be slow; 60s gives headroom. Raise if a large master
+    # still times out. The item list also uses $select to skip the Inventory
+    # flowfield, which is the usual cause of a slow items read.
+    bc_timeout_seconds: int = 60
     bc_items_entity: str = "Items"     # OData entity set for the item master (confirm name)
     bc_po_entity: str = "PurchaseOrders"  # OData entity set for purchase orders (confirm name)
     bc_receipt_entity: str = "PurchRcptHeaders"  # OData entity for posted receipts (confirm name)

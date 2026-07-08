@@ -401,6 +401,44 @@ def test_company_url_escapes_apostrophe(monkeypatch):
     assert BCAdapter()._company_url() == "http://bc/ODataV4/Company('O''Brien Co')"
 
 
+def test_list_items_selects_fields_and_skips_inventory_flowfield(live):
+    """The items read must $select explicit columns so BC doesn't recompute the
+    Inventory flowfield per row (the cause of the live timeout)."""
+    live._test_responses["get"] = [
+        {"value": [{"No": "WTL175", "Description": "White Top Liner", "Unit_Price": 1.9}]},
+    ]
+    items = live.list_items()
+    assert items[0]["sku"] == "WTL175" and items[0]["sales_price"] == 1.9
+    sel = live._test_calls[0]["params"]["$select"]
+    assert "Inventory" not in sel
+    for core in ("No", "Description", "Base_Unit_of_Measure", "Unit_Price"):
+        assert core in sel
+
+
+def test_list_items_falls_back_to_core_when_optional_field_absent(live, monkeypatch):
+    """If a configured optional field isn't on the item page BC 400s; the read
+    retries with core fields only so the whole sync doesn't fail."""
+    import requests
+
+    monkeypatch.setattr(settings, "bc_reorder_point_field", "Reorder_Point")
+    calls: list[str] = []
+
+    def flaky_get(url, params=None, session=None):
+        sel = (params or {}).get("$select", "")
+        calls.append(sel)
+        if "Reorder_Point" in sel:                      # optional field not on the page
+            resp = requests.Response()
+            resp.status_code = 400
+            raise requests.HTTPError("no property Reorder_Point", response=resp)
+        return {"value": [{"No": "A", "Description": "Item A", "Unit_Price": 1.0}]}
+
+    monkeypatch.setattr(live, "_get", flaky_get)
+    items = live.list_items()
+    assert [i["sku"] for i in items] == ["A"]
+    assert len(calls) == 2                               # first (rich) 400s, retry (core) succeeds
+    assert "Reorder_Point" in calls[0] and "Reorder_Point" not in calls[1]
+
+
 def test_list_customers_walks_pages_and_maps(live):
     live._test_responses["get"] = [
         {"value": [{"No": "C-1001", "Name": "Fiji Water", "E_Mail": "o@fw"}],
