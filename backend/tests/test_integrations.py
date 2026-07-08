@@ -28,11 +28,13 @@ def test_bc_map_item_uses_standard_fields():
     assert mapped["sales_price"] == 1.95
 
 
-def test_bc_list_items_live_parses_value_and_pages_by_top_skip(monkeypatch):
-    """Item master is read with explicit $top/$skip paging (BC's server-driven
-    paging dumped the whole table in one response and OOM'd the sync). With a
-    page size of 2 and 3 rows, the walk makes two requests and stops on the short
-    page."""
+def test_bc_list_items_live_keyset_pages_the_master(monkeypatch):
+    """Item master is read with KEYSET paging (No gt '<last>' + $orderby) because
+    this tenant ignores $skip and its server paging dumps the whole table at once.
+    With page size 2 and 3 rows: page 1 (no filter) -> A,B; page 2 (No gt 'B') ->
+    C (short) -> stop."""
+    import re
+
     all_rows = [
         {"No": "A", "Description": "Item A", "Unit_Price": 2.0},
         {"No": "B", "Description": "Item B", "Unit_Price": 3.0},
@@ -47,19 +49,24 @@ def test_bc_list_items_live_parses_value_and_pages_by_top_skip(monkeypatch):
     assert adapter.use_fakes is False
     monkeypatch.setattr(adapter, "_company_url", lambda: "")
 
-    calls = []
+    filters = []
 
     def fake_get(url, params=None, session=None):
-        skip = int((params or {}).get("$skip", 0))
-        top = int((params or {}).get("$top", len(all_rows)))
-        calls.append((skip, top))
-        return {"value": all_rows[skip:skip + top]}
+        p = params or {}
+        top = int(p.get("$top", len(all_rows)))
+        flt = p.get("$filter")
+        filters.append(flt)
+        rows = all_rows
+        if flt:
+            gt = re.search(r"No gt '(.*)'", flt).group(1)
+            rows = [r for r in all_rows if r["No"] > gt]
+        return {"value": rows[:top]}
 
     monkeypatch.setattr(adapter, "_get", fake_get)
     items = adapter.list_items()
     assert [i["sku"] for i in items] == ["A", "B", "C"]
     assert items[2]["sales_price"] == 4.0
-    assert calls == [(0, 2), (2, 2)]                      # second page short -> stop
+    assert filters == [None, "No gt 'B'"]                 # keyset advanced by last No
 
 
 def test_bc_usage_entries_live_filter_and_signed_netting(monkeypatch):

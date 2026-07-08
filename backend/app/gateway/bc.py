@@ -220,27 +220,36 @@ class BCAdapter:
 
     # READS
     def _paged_items(self, select_fields: list[str]) -> list[dict]:
-        """Walk the item master with explicit $top/$skip paging. BC's server-driven
-        (@odata.nextLink) paging returned this tenant's entire ~13k-row table — with
-        every field, ignoring $select — in ONE response, which OOM'd the sync; an
-        explicit $top bounds every response (and makes $select take effect here).
-        _map_item keeps only the small mapped columns, so the accumulated list stays
-        tiny even though the raw pages are discarded between requests."""
+        """Walk the item master with KEYSET paging: $orderby=No + $top + a
+        `No gt '<last>'` filter that advances by the last row seen.
+
+        Why not the obvious approaches: this tenant IGNORES $skip (every page
+        returns row 0 again) and its server-driven (@odata.nextLink) paging returns
+        the WHOLE ~13k-row table in one response — both loop or blow memory. A
+        keyset filter can't be ignored, so each request is bounded and the walk
+        always makes progress. $top also makes $select take effect here (trimming
+        to the mapped columns). _map_item keeps only small fields, so the
+        accumulated list stays tiny while raw pages are discarded between requests."""
         base = f"{self._company_url()}/{settings.bc_items_entity}"
         page = max(1, settings.bc_page_size)
+        select = ",".join(select_fields)
         out: list[dict] = []
-        skip = 0
+        last = None
         with self._session() as s:
             while True:
-                data = self._get(base, {
-                    "$select": ",".join(select_fields),
-                    "$top": str(page), "$skip": str(skip),
-                }, session=s)
-                batch = data.get("value", [])
-                out.extend(self._map_item(x) for x in batch)
-                if len(batch) < page:        # last (short) page
+                params = {"$select": select, "$top": str(page), "$orderby": F_NO}
+                if last is not None:
+                    params["$filter"] = f"{F_NO} gt '{_odata_str(last)}'"
+                batch = self._get(base, params, session=s).get("value", [])
+                if not batch:
                     break
-                skip += len(batch)
+                out.extend(self._map_item(x) for x in batch)
+                new_last = batch[-1].get(F_NO)
+                # Stop on the short final page, or if the key didn't advance (guards
+                # against an unexpected non-advancing response — never loop forever).
+                if len(batch) < page or new_last == last:
+                    break
+                last = new_last
         return out
 
     def list_items(self) -> list[dict]:
