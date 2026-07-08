@@ -38,6 +38,58 @@ def _published_entity_sets(adapter) -> set:
     return {e.get("name") for e in doc.get("value", []) if e.get("name")}
 
 
+def _string_props(adapter, entity_type_name: str) -> set:
+    """String property names actually exposed on an entity, read from BC's
+    $metadata (works even when the entity has zero rows). A page web service
+    only exposes fields placed on its layout, so this is the true field list —
+    the menu of candidate correlation fields.
+
+    Cached on the function so PO + receipt lookups share one metadata fetch."""
+    import xml.etree.ElementTree as ET
+
+    import requests
+
+    cache = getattr(_string_props, "_doc", None)
+    if cache is None:
+        url = f"{settings.bc_base_url.rstrip('/')}/$metadata"
+        r = requests.get(url, auth=adapter._auth(),
+                         verify=settings.bc_verify_tls, timeout=60)
+        r.raise_for_status()
+        cache = ET.fromstring(r.content)
+        _string_props._doc = cache
+
+    out = set()
+    for et in cache.iter():
+        if et.tag.endswith("}EntityType") and et.get("Name") == entity_type_name:
+            for p in et:
+                if (p.tag.endswith("}Property") and p.get("Name")
+                        and p.get("Type") == "Edm.String"):
+                    out.add(p.get("Name"))
+    return out
+
+
+def _print_correlation_candidates(adapter) -> None:
+    """List string fields present on BOTH the PO and posted-receipt entities —
+    the valid choices for BC_RECEIPT_CORRELATION_FIELD. Never raises."""
+    try:
+        po = _string_props(adapter, settings.bc_po_entity)
+        rc = _string_props(adapter, settings.bc_receipt_entity)
+    except Exception as exc:
+        print(f"       (couldn't read $metadata to list candidates: {exc})")
+        return
+    both = sorted(po & rc)
+    if not both:
+        print("       (no string field is exposed on BOTH entities — a field may "
+              "need adding to the page layouts)")
+        return
+    # Surface reference-ish names first; those are the natural correlation keys.
+    hint = ("reference", "vendor", "shipment", "external", "order", "invoice", "no")
+    likely = [f for f in both if any(h in f.lower() for h in hint)]
+    print("       Candidate correlation fields (string, on BOTH PO + receipt):")
+    print(f"         likely: {likely or '(none obvious)'}")
+    print(f"         all:    {both}")
+
+
 def main() -> int:
     field = sys.argv[1] if len(sys.argv) > 1 else "Your_Reference"
     problems = 0
@@ -106,9 +158,11 @@ def main() -> int:
               "(the exactly-once pre-check will work).")
     except Exception as exc:
         problems += 1
-        print(f"[{BAD}] '{field}' is not queryable on {settings.bc_receipt_entity}: {exc}")
-        print(f"       Pick a field that exists on the posted receipt, or expose "
-              f"'{field}' on that page's web service.")
+        short = str(exc).split(" for url:")[0]
+        print(f"[{BAD}] '{field}' is not queryable on {settings.bc_receipt_entity}: {short}")
+        print(f"       Pick a field that exists on the posted receipt (see below), or "
+              f"add '{field}' to that page's layout.")
+        _print_correlation_candidates(adapter)
 
     po_url = f"{adapter_company}/{settings.bc_po_entity}"
     if settings.bc_po_entity in published:
