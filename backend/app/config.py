@@ -65,6 +65,11 @@ class Settings(BaseSettings):
     # still times out. The item list also uses $select to skip the Inventory
     # flowfield, which is the usual cause of a slow items read.
     bc_timeout_seconds: int = 60
+    # Rows per page for client-driven ($top/$skip) reads of large entities (item
+    # master). BC's server-driven paging can return an entire multi-thousand-row
+    # table — with every field — in ONE response and OOM the container, so we page
+    # explicitly. Also, this tenant only honours $select when $top is present.
+    bc_page_size: int = 500
     bc_items_entity: str = "Items"     # OData entity set for the item master (confirm name)
     bc_po_entity: str = "PurchaseOrders"  # OData entity set for purchase orders (confirm name)
     bc_receipt_entity: str = "PurchRcptHeaders"  # OData entity for posted receipts (confirm name)

@@ -219,39 +219,46 @@ class BCAdapter:
         return fields
 
     # READS
-    def list_items(self) -> list[dict]:
-        """Item master (incl. price). Follows OData @odata.nextLink pagination.
+    def _paged_items(self, select_fields: list[str]) -> list[dict]:
+        """Walk the item master with explicit $top/$skip paging. BC's server-driven
+        (@odata.nextLink) paging returned this tenant's entire ~13k-row table — with
+        every field, ignoring $select — in ONE response, which OOM'd the sync; an
+        explicit $top bounds every response (and makes $select take effect here).
+        _map_item keeps only the small mapped columns, so the accumulated list stays
+        tiny even though the raw pages are discarded between requests."""
+        base = f"{self._company_url()}/{settings.bc_items_entity}"
+        page = max(1, settings.bc_page_size)
+        out: list[dict] = []
+        skip = 0
+        with self._session() as s:
+            while True:
+                data = self._get(base, {
+                    "$select": ",".join(select_fields),
+                    "$top": str(page), "$skip": str(skip),
+                }, session=s)
+                batch = data.get("value", [])
+                out.extend(self._map_item(x) for x in batch)
+                if len(batch) < page:        # last (short) page
+                    break
+                skip += len(batch)
+        return out
 
-        Uses $select (see _item_select_fields) so BC skips the Inventory flowfield
-        — without it the items read recomputes inventory per row and times out on
-        a busy tenant. If a selected field isn't exposed on the item page BC 400s;
-        we retry once with the core fields only so a stray optional field (e.g. a
-        Reorder_Point not on the list page) degrades gracefully instead of failing
-        the whole sync."""
+    def list_items(self) -> list[dict]:
+        """Item master (incl. price), paged with $top/$skip (see _paged_items).
+
+        $select trims to the mapped columns so BC skips the Inventory flowfield.
+        If a selected field isn't exposed on the item page BC 400s; we retry once
+        with the core columns so a stray optional field (e.g. a Reorder_Point not
+        on the list page) degrades gracefully instead of failing the whole sync."""
         if self.use_fakes:
             return fakes.list_items()
-        base = f"{self._company_url()}/{settings.bc_items_entity}"
-
-        def fetch(select_fields: list[str]) -> list[dict]:
-            out: list[dict] = []
-            with self._session() as s:
-                url, params = base, {"$select": ",".join(select_fields)}
-                while url:
-                    data = self._get(url, params, session=s)
-                    out.extend(self._map_item(x) for x in data.get("value", []))
-                    url = data.get("@odata.nextLink")
-                    params = None            # nextLink already carries the query
-            return out
-
         try:
-            return fetch(self._item_select_fields())
+            return self._paged_items(self._item_select_fields())
         except Exception as exc:
             status = getattr(getattr(exc, "response", None), "status_code", None)
             if status != 400:
                 raise
-            # A configured optional field isn't on the item page — fall back to the
-            # core columns so the sync still succeeds (attributes just come back unset).
-            return fetch([F_NO, F_NAME, F_UOM, F_PRICE])
+            return self._paged_items([F_NO, F_NAME, F_UOM, F_PRICE])
 
     def get_item_price(self, sku: str) -> Optional[float]:
         """Unit price for one SKU (BC item No). Demo data until BC is wired."""

@@ -32,6 +32,7 @@ services:
       # BC OData entity names (override per tenant; defaults are standard BC V4)
       BC_ITEMS_ENTITY: "${BC_ITEMS_ENTITY:-Items}"
       BC_TIMEOUT_SECONDS: "${BC_TIMEOUT_SECONDS:-60}"
+      BC_PAGE_SIZE: "${BC_PAGE_SIZE:-500}"
       BC_PO_ENTITY: "${BC_PO_ENTITY:-PurchaseOrders}"
       BC_PO_LINES_ENTITY: "${BC_PO_LINES_ENTITY:-PurchaseOrderLines}"
       # PO idempotency tag field (BC14 lacks External_Document_No; use Vendor_Order_No)

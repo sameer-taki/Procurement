@@ -28,31 +28,38 @@ def test_bc_map_item_uses_standard_fields():
     assert mapped["sales_price"] == 1.95
 
 
-def test_bc_list_items_live_parses_value_and_paginates(monkeypatch):
-    pages = {
-        "u1": {"value": [{"No": "A", "Description": "Item A", "Unit_Price": 2.0}],
-               "@odata.nextLink": "u2"},
-        "u2": {"value": [{"No": "B", "Description": "Item B", "Unit_Price": 3.0}]},
-    }
-    adapter = BC_live(monkeypatch, pages, start_url="u1")
-    items = adapter.list_items()
-    assert [i["sku"] for i in items] == ["A", "B"]
-    assert items[1]["sales_price"] == 3.0
-
-
-def BC_live(monkeypatch, pages, start_url):
-    """Build a BCAdapter forced into live mode with _get stubbed to walk `pages`."""
+def test_bc_list_items_live_parses_value_and_pages_by_top_skip(monkeypatch):
+    """Item master is read with explicit $top/$skip paging (BC's server-driven
+    paging dumped the whole table in one response and OOM'd the sync). With a
+    page size of 2 and 3 rows, the walk makes two requests and stops on the short
+    page."""
+    all_rows = [
+        {"No": "A", "Description": "Item A", "Unit_Price": 2.0},
+        {"No": "B", "Description": "Item B", "Unit_Price": 3.0},
+        {"No": "C", "Description": "Item C", "Unit_Price": 4.0},
+    ]
     monkeypatch.setattr(settings, "use_fake_adapters", False)
     monkeypatch.setattr(settings, "bc_base_url", "http://bc")
     monkeypatch.setattr(settings, "bc_username", "u")
     monkeypatch.setattr(settings, "bc_password", "p")
+    monkeypatch.setattr(settings, "bc_page_size", 2)      # force >1 page
     adapter = bc.BCAdapter()
     assert adapter.use_fakes is False
     monkeypatch.setattr(adapter, "_company_url", lambda: "")
-    monkeypatch.setattr(settings, "bc_items_entity", start_url)  # first url == "u1"
-    monkeypatch.setattr(adapter, "_get",
-                        lambda url, params=None, session=None: pages[url.lstrip("/")])
-    return adapter
+
+    calls = []
+
+    def fake_get(url, params=None, session=None):
+        skip = int((params or {}).get("$skip", 0))
+        top = int((params or {}).get("$top", len(all_rows)))
+        calls.append((skip, top))
+        return {"value": all_rows[skip:skip + top]}
+
+    monkeypatch.setattr(adapter, "_get", fake_get)
+    items = adapter.list_items()
+    assert [i["sku"] for i in items] == ["A", "B", "C"]
+    assert items[2]["sales_price"] == 4.0
+    assert calls == [(0, 2), (2, 2)]                      # second page short -> stop
 
 
 def test_bc_usage_entries_live_filter_and_signed_netting(monkeypatch):
