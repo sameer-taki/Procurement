@@ -63,6 +63,7 @@ code change**. The defaults (override any that differ):
 | `BC_ITEMS_ENTITY` | `Items` | item master + `Inventory` reconciliation read |
 | `BC_PO_ENTITY` | `PurchaseOrders` | PO header create + receive post action |
 | `BC_PO_LINES_ENTITY` | `PurchaseOrderLines` | PO line posting, `Qty_to_Receive` |
+| `BC_PO_EXTREF_FIELD` | `External_Document_No` | PO header field holding the app's PO no. (idempotent find-or-create); **BC14 lacks this on the PO page — use `Vendor_Order_No`** |
 | `BC_RECEIPT_ENTITY` | `PurchRcptHeaders` | posted-receipt number readback |
 | `BC_INVOICE_ENTITY` | `PurchInvHeaders` | 3-way match (posted invoice = MATCHED) |
 | `BC_VENDORS_ENTITY` | `Vendors` | vendor master sync |

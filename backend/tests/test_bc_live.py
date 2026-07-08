@@ -188,6 +188,23 @@ def test_create_po_retry_completes_only_the_missing_line(live):
     assert posts[0]["body"]["Line_No"] == 20000        # max existing (10000) + 10000
 
 
+def test_create_po_uses_configurable_extref_field(live, monkeypatch):
+    """BC14 doesn't expose External_Document_No on the PO page; the idempotency
+    tag field is configurable. Header create AND the retry lookup must use it."""
+    monkeypatch.setattr(settings, "bc_po_extref_field", "Vendor_Order_No")
+    live._test_responses["get"] = [{"value": []}, {"value": []}]
+    live._test_responses["send"] = [{"No": "106001"}]
+
+    assert live.create_purchase_order(PO_PAYLOAD) == "106001"
+
+    header = [c for c in live._test_calls if c["method"] == "post"][0]
+    assert header["body"]["Vendor_Order_No"] == "PO-000123"
+    assert "External_Document_No" not in header["body"]
+    # the find-or-create lookup filters on the same field
+    find = live._test_calls[0]
+    assert find["params"]["$filter"] == "Vendor_Order_No eq 'PO-000123'"
+
+
 def test_create_po_raises_when_bc_returns_no_number(live):
     live._test_responses["get"] = [{"value": []}]
     live._test_responses["send"] = [{}]            # header create came back empty

@@ -72,6 +72,12 @@ class Settings(BaseSettings):
     # --- BC live-mode mapping (all standard BC V4 defaults; override per tenant,
     # no code changes needed — see INTEGRATIONS.md) ---
     bc_po_lines_entity: str = "PurchaseOrderLines"   # purchase-order lines entity set
+    # The purchase-order header field that carries THIS app's PO number, used to
+    # find-or-create idempotently on retry. Standard/newer BC exposes
+    # 'External_Document_No'; BC14 on-prem does NOT surface it on the Purchase
+    # Order page — use a field that IS exposed there, e.g. 'Vendor_Order_No'.
+    # Must be queryable + writable on the PO page (see the readiness probe).
+    bc_po_extref_field: str = "External_Document_No"
     bc_invoice_entity: str = "PurchInvHeaders"       # posted purchase invoices (3-way match)
     bc_vendors_entity: str = "Vendors"               # vendor master
     bc_customers_entity: str = "Customers"           # customer master (publish Page 22 as 'Customers')

@@ -91,7 +91,9 @@ def _print_correlation_candidates(adapter) -> None:
 
 
 def main() -> int:
-    field = sys.argv[1] if len(sys.argv) > 1 else "Your_Reference"
+    # Field to test: CLI arg > the configured env value > a sensible default.
+    field = (sys.argv[1] if len(sys.argv) > 1
+             else settings.bc_receipt_correlation_field or "Your_Reference")
     problems = 0
 
     print(f"BC write-path readiness — correlation field: {field}\n")
@@ -150,38 +152,67 @@ def main() -> int:
         return 1
 
     adapter_company = adapter._company_url()
+    po_url = f"{adapter_company}/{settings.bc_po_entity}"
     rcpt_url = f"{adapter_company}/{settings.bc_receipt_entity}"
+    po_published = settings.bc_po_entity in published
+
+    def sample_po(fieldname: str, purpose: str) -> int:
+        """Report whether fieldname already holds real data on existing POs (we
+        overwrite it, so it must be free). Returns 1 if it's in use, else 0."""
+        if not po_published:
+            return 0
+        try:
+            rows = adapter._get(po_url, {"$top": "20", "$select": f"No,{fieldname}"}).get("value", [])
+        except Exception as exc:
+            print(f"[{WARN}] Couldn't sample '{fieldname}': {str(exc).split(' for url:')[0]}")
+            return 0
+        used = [r for r in rows if str(r.get(fieldname) or "").strip()]
+        if not rows:
+            print(f"[{WARN}] No POs to sample — can't confirm '{fieldname}' ({purpose}) is free.")
+            return 0
+        if used:
+            eg = ", ".join(f"{r.get('No')}={r.get(fieldname)!r}" for r in used[:5])
+            print(f"[{BAD}] '{fieldname}' ({purpose}) holds real data on {len(used)}/{len(rows)} "
+                  f"sampled POs — don't repurpose it. e.g. {eg}")
+            return 1
+        print(f"[{OK}] '{fieldname}' ({purpose}) is blank on all {len(rows)} sampled POs — safe.")
+        return 0
+
+    # The two tag fields must differ: one holds the PO number, the other the GRN.
+    if field and field == settings.bc_po_extref_field:
+        problems += 1
+        print(f"[{BAD}] correlation field and BC_PO_EXTREF_FIELD are both '{field}' — "
+              "they must be different fields.")
+
+    # PO idempotency tag (BC_PO_EXTREF_FIELD): queryable + free on the PO page.
+    extref = settings.bc_po_extref_field
+    if po_published:
+        try:
+            adapter._get(po_url, {"$top": "1", "$select": f"No,{extref}"})
+            print(f"[{OK}] PO ext-ref field '{extref}' is queryable on {settings.bc_po_entity}.")
+            problems += sample_po(extref, "PO idempotency tag")
+        except Exception as exc:
+            problems += 1
+            print(f"[{BAD}] PO ext-ref field '{extref}' not queryable on {settings.bc_po_entity}: "
+                  f"{str(exc).split(' for url:')[0]}")
+            try:
+                print("       Set BC_PO_EXTREF_FIELD to a string field exposed on the PO:")
+                print(f"         {sorted(_string_props(adapter, settings.bc_po_entity))}")
+            except Exception:
+                pass
+
+    # Receipt exactly-once correlation field: queryable on the receipt + free on the PO.
     try:
         adapter._get(rcpt_url, {"$top": "1", "$select": f"No,{field}",
                                 "$filter": f"{field} eq 'PROBE-NONEXISTENT'"})
-        print(f"[{OK}] '{field}' is queryable on {settings.bc_receipt_entity} "
-              "(the exactly-once pre-check will work).")
+        print(f"[{OK}] correlation field '{field}' is queryable on {settings.bc_receipt_entity}.")
+        problems += sample_po(field, "receipt correlation key")
     except Exception as exc:
         problems += 1
-        short = str(exc).split(" for url:")[0]
-        print(f"[{BAD}] '{field}' is not queryable on {settings.bc_receipt_entity}: {short}")
-        print(f"       Pick a field that exists on the posted receipt (see below), or "
-              f"add '{field}' to that page's layout.")
+        print(f"[{BAD}] correlation field '{field}' not queryable on {settings.bc_receipt_entity}: "
+              f"{str(exc).split(' for url:')[0]}")
+        print(f"       Pick a field on BOTH PO + receipt (see below), or add '{field}' to the receipt layout.")
         _print_correlation_candidates(adapter)
-
-    po_url = f"{adapter_company}/{settings.bc_po_entity}"
-    if settings.bc_po_entity in published:
-        try:
-            data = adapter._get(po_url, {"$top": "20", "$select": f"No,{field}"})
-            rows = data.get("value", [])
-            used = [r for r in rows if str(r.get(field) or "").strip()]
-            if not rows:
-                print(f"[{WARN}] No purchase orders to sample — can't tell if '{field}' is used.")
-            elif used:
-                problems += 1
-                sample = ", ".join(f"{r.get('No')}={r.get(field)!r}" for r in used[:5])
-                print(f"[{BAD}] '{field}' is populated on {len(used)}/{len(rows)} sampled POs "
-                      f"— it holds real data. Do NOT repurpose it. e.g. {sample}")
-            else:
-                print(f"[{OK}] '{field}' is blank on all {len(rows)} sampled POs "
-                      "— safe to repurpose as the correlation key.")
-        except Exception as exc:
-            print(f"[{WARN}] Could not sample '{field}' on POs: {exc}")
 
     print()
     if problems:

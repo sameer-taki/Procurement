@@ -33,6 +33,8 @@ services:
       BC_ITEMS_ENTITY: "${BC_ITEMS_ENTITY:-Items}"
       BC_PO_ENTITY: "${BC_PO_ENTITY:-PurchaseOrders}"
       BC_PO_LINES_ENTITY: "${BC_PO_LINES_ENTITY:-PurchaseOrderLines}"
+      # PO idempotency tag field (BC14 lacks External_Document_No; use Vendor_Order_No)
+      BC_PO_EXTREF_FIELD: "${BC_PO_EXTREF_FIELD:-External_Document_No}"
       BC_RECEIPT_ENTITY: "${BC_RECEIPT_ENTITY:-PurchRcptHeaders}"
       BC_INVOICE_ENTITY: "${BC_INVOICE_ENTITY:-PurchInvHeaders}"
       BC_USAGE_ENTITY: "${BC_USAGE_ENTITY:-ItemLedgerEntries}"

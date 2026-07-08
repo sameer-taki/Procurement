@@ -422,10 +422,10 @@ class BCAdapter:
     # WRITES
     def _find_po_no(self, number: str) -> Optional[str]:
         """The BC document No of an order previously created for our PO number
-        (External_Document_No carries it) — the retry-safety lookup."""
+        (bc_po_extref_field carries it) — the retry-safety lookup."""
         url = f"{self._company_url()}/{settings.bc_po_entity}"
         data = self._get(url, {
-            "$filter": f"External_Document_No eq '{_odata_str(number)}'",
+            "$filter": f"{settings.bc_po_extref_field} eq '{_odata_str(number)}'",
             "$select": F_NO, "$top": "1",
         })
         values = data.get("value") or []
@@ -500,7 +500,7 @@ class BCAdapter:
         if bc_po_no is None:
             data = self._send("post", f"{self._company_url()}/{settings.bc_po_entity}", {
                 "Buy_from_Vendor_No": po.get("vendor_bc_no") or po.get("vendor_no"),
-                "External_Document_No": number,
+                settings.bc_po_extref_field: number,
             })
             bc_po_no = data.get(F_NO)
             if not bc_po_no:
