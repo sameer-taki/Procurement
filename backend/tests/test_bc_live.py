@@ -439,6 +439,28 @@ def test_list_items_falls_back_to_core_when_optional_field_absent(live, monkeypa
     assert "Reorder_Point" in calls[0] and "Reorder_Point" not in calls[1]
 
 
+def test_list_vendors_falls_back_when_email_not_on_page(live, monkeypatch):
+    """GML's published Vendor List doesn't expose E_Mail — the first (rich)
+    select 400s and the walk retries with No+Name; email syncs as None."""
+    import requests
+
+    calls: list[str] = []
+
+    def flaky_get(url, params=None, session=None):
+        sel = (params or {}).get("$select", "")
+        calls.append(sel)
+        if "E_Mail" in sel:
+            resp = requests.Response()
+            resp.status_code = 400
+            raise requests.HTTPError("no property E_Mail", response=resp)
+        return {"value": [{"No": "V-2001", "Name": "Visy Board"}]}
+
+    monkeypatch.setattr(live, "_get", flaky_get)
+    out = live.list_vendors()
+    assert out == [{"bc_vendor_no": "V-2001", "name": "Visy Board", "email": None}]
+    assert "E_Mail" in calls[0] and "E_Mail" not in calls[1]
+
+
 def test_list_customers_walks_pages_and_maps(live):
     live._test_responses["get"] = [
         {"value": [{"No": "C-1001", "Name": "Fiji Water", "E_Mail": "o@fw"}],

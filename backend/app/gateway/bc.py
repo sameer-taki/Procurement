@@ -367,28 +367,46 @@ class BCAdapter:
                 url = data.get("@odata.nextLink")
         return out
 
+    def _list_master(self, entity: str, no_key: str) -> list[dict]:
+        """Walk a No/Name/E_Mail master (vendors, customers): [{no_key, name,
+        email}]. On-prem page services expose only the fields on the page layout;
+        when E_Mail isn't there (GML's Vendor List 400s on it) retry with No+Name
+        so the sync still lands — email just syncs as None until the field is
+        added to the page."""
+        def walk(with_email: bool) -> list[dict]:
+            fields = [F_NO, F_VENDOR_NAME] + ([F_VENDOR_EMAIL] if with_email else [])
+            url = f"{self._company_url()}/{entity}"
+            params: Optional[dict] = {"$select": ",".join(fields)}
+            out: list[dict] = []
+            with self._session() as s:
+                while url:
+                    data = self._get(url, params, session=s)
+                    params = None          # nextLink already carries the query
+                    for x in data.get("value", []):
+                        no = x.get(F_NO)
+                        if no:
+                            out.append({
+                                no_key: no,
+                                "name": x.get(F_VENDOR_NAME) or no,
+                                "email": x.get(F_VENDOR_EMAIL) or None,
+                            })
+                    url = data.get("@odata.nextLink")
+            return out
+
+        try:
+            return walk(True)
+        except Exception as exc:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            if status != 400:
+                raise
+            return walk(False)
+
     def list_vendors(self) -> list[dict]:
         """Vendor master: [{bc_vendor_no, name, email}]. BC owns vendors
         (CLAUDE.md §2); live mode syncs them into the app's read-only mirror."""
         if self.use_fakes:
             return fakes.vendors()
-        url = f"{self._company_url()}/{settings.bc_vendors_entity}"
-        out: list[dict] = []
-        params = {"$select": f"{F_NO},{F_VENDOR_NAME},{F_VENDOR_EMAIL}"}
-        with self._session() as s:
-            while url:
-                data = self._get(url, params, session=s)
-                params = None
-                for x in data.get("value", []):
-                    no = x.get(F_NO)
-                    if no:
-                        out.append({
-                            "bc_vendor_no": no,
-                            "name": x.get(F_VENDOR_NAME) or no,
-                            "email": x.get(F_VENDOR_EMAIL) or None,
-                        })
-                url = data.get("@odata.nextLink")
-        return out
+        return self._list_master(settings.bc_vendors_entity, "bc_vendor_no")
 
     def list_customers(self) -> list[dict]:
         """Customer master: [{bc_customer_no, name, email}]. BC owns customers
@@ -397,23 +415,7 @@ class BCAdapter:
         Page 22 (Customer List) as the `Customers` web service on the tenant."""
         if self.use_fakes:
             return fakes.customers()
-        url = f"{self._company_url()}/{settings.bc_customers_entity}"
-        out: list[dict] = []
-        params = {"$select": f"{F_NO},{F_VENDOR_NAME},{F_VENDOR_EMAIL}"}
-        with self._session() as s:
-            while url:
-                data = self._get(url, params, session=s)
-                params = None
-                for x in data.get("value", []):
-                    no = x.get(F_NO)
-                    if no:
-                        out.append({
-                            "bc_customer_no": no,
-                            "name": x.get(F_VENDOR_NAME) or no,
-                            "email": x.get(F_VENDOR_EMAIL) or None,
-                        })
-                url = data.get("@odata.nextLink")
-        return out
+        return self._list_master(settings.bc_customers_entity, "bc_customer_no")
 
     def get_vendor(self, vendor_no: str) -> Optional[dict]:
         """One vendor by BC No; None when unknown."""
@@ -425,8 +427,16 @@ class BCAdapter:
         url = f"{self._company_url()}/{settings.bc_vendors_entity}('{_odata_str(vendor_no)}')"
         try:
             x = self._get(url, {"$select": f"{F_NO},{F_VENDOR_NAME},{F_VENDOR_EMAIL}"})
-        except Exception:
-            return None
+        except Exception as exc:
+            # E_Mail not on the page (400) -> retry without it; anything else
+            # (404 unknown vendor, network) keeps the None contract.
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            if status != 400:
+                return None
+            try:
+                x = self._get(url, {"$select": f"{F_NO},{F_VENDOR_NAME}"})
+            except Exception:
+                return None
         no = x.get(F_NO)
         if not no:
             return None
