@@ -114,7 +114,30 @@ Do NOT rotate `DB_PASSWORD` — it is permanent for the life of `pgdata`.
 - Hostnames/labels use `gml.com.fj`; the mail identity `no-reply@golden.com.fj`
   is a different domain on purpose.
 
-## 9. GitOps settings that MUST hold (diagnosed 2026-07 — cost a full day)
+## 9. Turning on Entra ID SSO (runbook)
+
+The code is live; SSO turns on the moment the four env vars are set. In the
+Azure portal (Entra ID → App registrations):
+
+1. **New registration** — name e.g. `Golden Procurement`, single tenant.
+   Redirect URI (type **Web**): `https://procurement.gml.com.fj/auth/callback`.
+2. **Certificates & secrets** → new client secret. Copy the VALUE immediately
+   (shown once). Note its expiry — set a calendar reminder to rotate.
+3. **App roles** → create roles whose *value* is exactly one of
+   `REQUESTER / OFFICER / APPROVER / VIEWER / ADMIN`, then assign users/groups
+   under **Enterprise applications → your app → Users and groups**.
+   (Alternative: keep Entra groups and set `ENTRA_ROLE_MAP` to a JSON object
+   mapping group id → role code. Users with no mapped role land as
+   `DEFAULT_ROLE`, VIEWER.)
+4. In Portainer set:
+   `ENTRA_TENANT_ID` (Directory ID), `ENTRA_CLIENT_ID` (Application ID),
+   `ENTRA_CLIENT_SECRET`, `ENTRA_REDIRECT_URI=https://procurement.gml.com.fj/auth/callback`
+   — redeploy. The login page now shows **Sign in with Microsoft**; users
+   auto-provision on first login with their mapped role, and the Admin screen
+   can promote/deactivate them afterwards.
+5. Keep `ADMIN_USERNAME`/`ADMIN_PASSWORD` as the break-glass local login.
+
+## 10. GitOps settings that MUST hold (diagnosed 2026-07 — cost a full day)
 
 Symptom when violated: the app container is silently killed and recreated every
 1–5 minutes (`docker events` shows compose `create → kill → destroy → rename`),

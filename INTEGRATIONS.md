@@ -131,7 +131,24 @@ accounts for all of it. Recorded so nobody re-diagnoses:
   Data entered in the wrong company is invisible to the app — `BC_COMPANY`
   must be `Golden Manufacturers Pte Ltd` and BC-side entry must happen there.
 * **First live write proven** 2026-07-08: PO + price-row inserts accepted
-  (`GML\administrator`), FK validation active.
+  (`GML\administrator`), FK validation active. Full loop verified the same day:
+  requisition → approval → PO posted to BC (`Vendor_Shipment_No` = app PO no).
+
+**Go-live tools (in-app):**
+
+* `GET /api/planning/grade-preview?regex=…` — dry-runs a candidate
+  `BC_PAPER_SKU_REGEX` over the synced master (match count, grades, samples)
+  so the pattern is tuned on evidence before setting the env var. On this
+  tenant the item No IS the grade, so start from a grade-only pattern (e.g.
+  `^([A-Z]{2,4}\d{2,3})\Z`) and inspect the sample for false positives.
+* Vendor **order emails** are set in-app (Vendors screen / `PATCH
+  /api/vendors/{id}`) because the BC page exposes no E_Mail; the sync
+  preserves them (only overwrites when BC supplies a value).
+* `POST /api/admin/purge-demo-data` (ADMIN, live-mode only) removes the demo
+  catalog once real masters are synced; anything referenced by orders is kept
+  and reported.
+* The usage import reads the item ledger **one month per request** — never an
+  unbounded walk (see the paging findings above).
 
 ### Paper planning: the usage export + grade/deckle
 

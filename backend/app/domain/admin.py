@@ -248,6 +248,111 @@ def system_health(
     }
 
 
+# --------------------------------------------------------------------------- #
+# Demo-data purge (post-go-live cleanup)
+# --------------------------------------------------------------------------- #
+@router.post("/purge-demo-data")
+def purge_demo_data(
+    session: Session = Depends(get_session),
+    admin: CurrentUser = Depends(require_admin),
+):
+    """Remove the demo catalog once live BC data exists — demo items/vendors/
+    customers otherwise sit mixed in with the real master (BOARD-200K next to
+    real SKUs) and pollute search, planning, and vendor selection.
+
+    Safety:
+      * refuses in demo mode (purging there just empties the app and the
+        on-empty seed puts it all back on next boot);
+      * identifiers come from gateway/fakes.py — the single source of what
+        "demo" means — never name heuristics;
+      * anything referenced by a requisition, PO, or receipt line is SKIPPED
+        (reported back), so historical orders keep their rows;
+      * live-mode syncs never re-seed (all seed_* no-op when BC is live), so
+        the purge sticks.
+    """
+    from sqlmodel import delete
+
+    from ..gateway import fakes
+    from ..gateway.bc import BCAdapter
+    from ..gateway.models import (
+        BomHeader, BomLine, Customer, Forecast, Item, POLine, RequisitionLine,
+        StockSnapshot, UsageHistory, Vendor, VendorPrice,
+    )
+
+    if BCAdapter().use_fakes:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="BC is in demo mode — purging now would just re-seed on the "
+                   "next boot. Configure live BC first.",
+        )
+
+    demo_skus = {row["sku"] for row in fakes.CATALOG}
+    demo_vendor_nos = {v["bc_vendor_no"] for v in fakes.VENDORS}
+    demo_customer_nos = {c["bc_customer_no"] for c in fakes.customers()}
+    summary = {"items": 0, "vendors": 0, "customers": 0, "vendor_prices": 0,
+               "boms": 0, "forecasts": 0, "usage_rows": 0, "stock_rows": 0,
+               "skipped_items": [], "skipped_vendors": []}
+
+    demo_items = session.exec(select(Item).where(Item.sku.in_(demo_skus))).all()
+    referenced_item_ids = set()
+    if demo_items:
+        ids = [it.id for it in demo_items]
+        for model in (RequisitionLine, POLine):
+            referenced_item_ids.update(
+                session.exec(select(model.item_id).where(model.item_id.in_(ids))).all()
+            )
+    deletable = [it for it in demo_items if it.id not in referenced_item_ids]
+    summary["skipped_items"] = sorted(
+        it.sku for it in demo_items if it.id in referenced_item_ids
+    )
+    if deletable:
+        ids = [it.id for it in deletable]
+        # Dependents first (no DB-level cascades), then the items themselves.
+        bom_ids = session.exec(
+            select(BomHeader.id).where(BomHeader.parent_item_id.in_(ids))
+        ).all()
+        if bom_ids:
+            session.exec(delete(BomLine).where(BomLine.bom_header_id.in_(bom_ids)))
+            summary["boms"] = len(bom_ids)
+            session.exec(delete(BomHeader).where(BomHeader.id.in_(bom_ids)))
+        # Demo BOM lines only reference demo components, but clear any lines
+        # under surviving headers that point at deleted items too.
+        session.exec(delete(BomLine).where(BomLine.component_id.in_(ids)))
+        for model, key in ((StockSnapshot, "stock_rows"), (VendorPrice, "vendor_prices"),
+                           (Forecast, "forecasts"), (UsageHistory, "usage_rows")):
+            res = session.exec(delete(model).where(model.item_id.in_(ids)))
+            summary[key] += res.rowcount or 0
+        session.exec(delete(Item).where(Item.id.in_(ids)))
+        summary["items"] = len(ids)
+
+    # Demo vendors: skip any that a PO references; drop their remaining prices.
+    from ..gateway.models import PurchaseOrder
+    demo_vendors = session.exec(
+        select(Vendor).where(Vendor.bc_vendor_no.in_(demo_vendor_nos))
+    ).all()
+    for v in demo_vendors:
+        po = session.exec(
+            select(PurchaseOrder).where(PurchaseOrder.vendor_id == v.id)
+        ).first()
+        if po is not None:
+            summary["skipped_vendors"].append(v.name)
+            continue
+        res = session.exec(delete(VendorPrice).where(VendorPrice.vendor_id == v.id))
+        summary["vendor_prices"] += res.rowcount or 0
+        session.delete(v)
+        summary["vendors"] += 1
+
+    res = session.exec(
+        delete(Customer).where(Customer.bc_customer_no.in_(demo_customer_nos))
+    )
+    summary["customers"] = res.rowcount or 0
+
+    _audit(session, entity_kind=SYSTEM_ENTITY_KIND, entity_id="demo-purge",
+           event_type="DEMO_DATA_PURGED", actor=admin.email, detail=summary)
+    session.commit()
+    return summary
+
+
 @router.post("/outbox/{row_id}/retry")
 def retry_outbox_row(
     row_id: int,

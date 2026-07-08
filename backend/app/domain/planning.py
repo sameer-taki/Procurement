@@ -33,6 +33,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from ..auth.deps import CurrentUser, get_current_user
+from ..config import settings
 from ..db import get_session
 from ..gateway import planning as engine
 from ..gateway.bc import BCAdapter
@@ -672,6 +673,74 @@ def reconciliation_endpoint(
     _: CurrentUser = Depends(get_current_user),
 ):
     return reconciliation(session)
+
+
+@router.get("/planning/grade-preview")
+def grade_preview_endpoint(
+    regex: Optional[str] = None,
+    session: Session = Depends(get_session),
+    _: CurrentUser = Depends(get_current_user),
+):
+    """Dry-run a candidate BC_PAPER_SKU_REGEX against the synced item master.
+
+    On GML's tenant the item No IS the grade (WTL175 — no deckle suffix), so the
+    default grade-deckle pattern classifies nothing and the Order Page sees no
+    paper. This endpoint lets the operator test a pattern against the real 13k
+    SKUs BEFORE setting the env var: it reports how many items would gain a
+    grade, the distinct grades, and samples — including likely false positives
+    to trim. Same semantics as the sync (group 1 = grade, optional group 2 =
+    deckle). Read-only: applying the pattern is still the env change + a resync.
+    """
+    import re as _re
+
+    pattern = regex if regex is not None else settings.bc_paper_sku_regex
+    if not pattern or len(pattern) > 200:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="Provide a regex of at most 200 characters")
+    try:
+        compiled = _re.compile(pattern)
+    except _re.error as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail=f"Bad regex: {exc}")
+
+    sample: list[dict] = []
+    grades: set = set()
+    total = 0
+    match_count = 0
+    already_graded = 0
+    # Scalars only (sku, name, grade) — never 13k ORM objects.
+    for sku, name, grade in session.exec(
+        select(Item.sku, Item.name, Item.grade)
+    ).all():
+        total += 1
+        if grade:
+            already_graded += 1
+        m = compiled.match(sku or "")
+        if not m:
+            continue
+        match_count += 1
+        groups = m.groups()
+        g = groups[0] if groups else sku
+        deckle = None
+        if len(groups) > 1 and groups[1]:
+            try:
+                deckle = int(groups[1])
+            except (TypeError, ValueError):
+                deckle = None
+        grades.add(g)
+        if len(sample) < 50:
+            sample.append({"sku": sku, "name": name, "grade": g, "deckle_mm": deckle})
+
+    return {
+        "regex": pattern,
+        "configured_regex": settings.bc_paper_sku_regex,
+        "total_items": total,
+        "items_currently_graded": already_graded,
+        "match_count": match_count,
+        "distinct_grades": len(grades),
+        "grades": sorted(grades)[:100],
+        "sample": sample,
+    }
 
 
 @router.post("/planning/import-usage")

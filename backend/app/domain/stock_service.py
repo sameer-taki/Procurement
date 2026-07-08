@@ -185,7 +185,9 @@ def sync_customers(session: Session) -> int:
             cust = Customer(bc_customer_no=r["bc_customer_no"], name=r["name"])
             by_no[r["bc_customer_no"]] = cust
         cust.name = r["name"]
-        cust.email = r.get("email")
+        # Same rule as vendors: never wipe an in-app email with BC's None.
+        if r.get("email") is not None:
+            cust.email = r["email"]
         session.add(cust)
         count += 1
     session.commit()
@@ -212,7 +214,11 @@ def sync_vendors(session: Session) -> int:
             vendor = Vendor(bc_vendor_no=r["bc_vendor_no"], name=r["name"])
             by_no[r["bc_vendor_no"]] = vendor
         vendor.name = r["name"]
-        vendor.email = r.get("email")
+        # Only overwrite email when BC actually supplies one: GML's Vendor List
+        # page doesn't expose E_Mail (syncs None), and emails entered in-app
+        # (PATCH /api/vendors) must survive the 30-min sync, not be wiped by it.
+        if r.get("email") is not None:
+            vendor.email = r["email"]
         session.add(vendor)
         count += 1
     session.commit()

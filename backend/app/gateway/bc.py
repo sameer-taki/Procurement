@@ -307,30 +307,43 @@ class BCAdapter:
             return fakes.usage_entries()
 
         from .planning import trailing_periods
-        window_start = trailing_periods(months)[0] + "-01"
         entry_types = [
             t.strip() for t in settings.bc_usage_entry_types.split(",") if t.strip()
         ]
         type_filter = " or ".join(f"Entry_Type eq '{_odata_str(t)}'" for t in entry_types)
-        url = f"{self._company_url()}/{settings.bc_usage_entity}"
+        base = f"{self._company_url()}/{settings.bc_usage_entity}"
         by_item_month: dict[tuple, float] = {}
-        params = {
-            "$filter": f"({type_filter}) and Posting_Date ge {window_start}",
-            "$select": "Item_No,Posting_Date,Quantity",
-        }
+
+        def month_bounds(period: str) -> tuple:
+            y, m = int(period[:4]), int(period[5:7])
+            nxt = f"{y + 1:04d}-01-01" if m == 12 else f"{y:04d}-{m + 1:02d}-01"
+            return f"{period}-01", nxt
+
+        # One request per trailing month, not one unbounded walk: this tenant's
+        # server paging can dump an entire table in a single response (see the
+        # item-master keyset notes), and the full ledger is years of postings.
+        # A month of filtered usage rows is small and bounded; nextLink within
+        # a window (if BC pages it) is still followed.
         with self._session() as s:
-            while url:
-                data = self._get(url, params, session=s)
-                params = None          # nextLink already carries the query
-                for x in data.get("value", []):
-                    sku = x.get("Item_No")
-                    posted = str(x.get("Posting_Date") or "")
-                    if not sku or len(posted) < 7:
-                        continue
-                    period = posted[:7]
-                    key = (sku, period)
-                    by_item_month[key] = by_item_month.get(key, 0.0) + float(x.get("Quantity") or 0)
-                url = data.get("@odata.nextLink")
+            for period in trailing_periods(months):
+                start, end = month_bounds(period)
+                url = base
+                params: Optional[dict] = {
+                    "$filter": (f"({type_filter}) and Posting_Date ge {start} "
+                                f"and Posting_Date lt {end}"),
+                    "$select": "Item_No,Posting_Date,Quantity",
+                }
+                while url:
+                    data = self._get(url, params, session=s)
+                    params = None          # nextLink already carries the query
+                    for x in data.get("value", []):
+                        sku = x.get("Item_No")
+                        posted = str(x.get("Posting_Date") or "")
+                        if not sku or len(posted) < 7:
+                            continue
+                        key = (sku, posted[:7])
+                        by_item_month[key] = by_item_month.get(key, 0.0) + float(x.get("Quantity") or 0)
+                    url = data.get("@odata.nextLink")
         # Net consumption is the negative of the signed sum; a month whose
         # corrections outweigh its consumption clamps to zero, never negative.
         return [

@@ -25,7 +25,7 @@ from sqlalchemy import or_
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select, update
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .. import mailer
 from ..auth.deps import CurrentUser, get_current_user
@@ -1393,10 +1393,56 @@ def _refresh_received_items(session: Session, received_lines: list[dict]) -> lis
 
 @router.get("/vendors")
 def list_vendors(
+    q: Optional[str] = Query(None),
+    limit: int = Query(200, ge=1, le=500),
     session: Session = Depends(get_session),
     _: CurrentUser = Depends(get_current_user),
 ):
+    stmt = select(Vendor)
+    if q:
+        stmt = stmt.where(Vendor.name.ilike(f"%{q}%"))
     return [
         {"id": v.id, "name": v.name, "email": v.email, "bc_vendor_no": v.bc_vendor_no}
-        for v in session.exec(select(Vendor).order_by(Vendor.name)).all()
+        for v in session.exec(stmt.order_by(Vendor.name).limit(limit)).all()
     ]
+
+
+class VendorPatchIn(BaseModel):
+    # None/blank clears the address. Loose shape check only — the real
+    # validation is Graph refusing to deliver; we just stop obvious typos.
+    email: Optional[str] = Field(default=None, max_length=254)
+
+
+@router.patch("/vendors/{vendor_id}")
+def update_vendor_email(
+    vendor_id: str,
+    body: VendorPatchIn,
+    session: Session = Depends(get_session),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Set a vendor's ORDER EMAIL in-app. BC owns the vendor master, but GML's
+    published Vendor List doesn't expose E_Mail, so the address is an app-side
+    contact override — the sync only overwrites it when BC actually supplies
+    one. This is what the PO-issued vendor notification sends to."""
+    _require_po_editor(user)
+    vendor = session.get(Vendor, vendor_id)
+    if vendor is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail="Unknown vendor")
+    email = (body.email or "").strip() or None
+    if email is not None and ("@" not in email or " " in email):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="That doesn't look like an email address")
+    before = vendor.email
+    vendor.email = email
+    session.add(vendor)
+    _record_event(
+        session,
+        entity_kind="VENDOR", entity_id=vendor.id,
+        from_status=None, to_status=None,
+        event_type="VENDOR_EMAIL_UPDATED", actor=user.email,
+        detail={"before": before, "after": email, "vendor": vendor.name},
+    )
+    session.commit()
+    return {"id": vendor.id, "name": vendor.name, "email": vendor.email,
+            "bc_vendor_no": vendor.bc_vendor_no}

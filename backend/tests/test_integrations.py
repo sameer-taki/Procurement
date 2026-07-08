@@ -69,40 +69,54 @@ def test_bc_list_items_live_keyset_pages_the_master(monkeypatch):
     assert filters == [None, "No gt 'B'"]                 # keyset advanced by last No
 
 
-def test_bc_usage_entries_live_filter_and_signed_netting(monkeypatch):
+def test_bc_usage_entries_live_windows_filter_and_signed_netting(monkeypatch):
     """The live usage read (verified against GML's BC140):
-    * $filter carries every configured Entry_Type (Kiwiplan usage posts as
-      'Negative Adjmt.'; 'Consumption' kept for a later switch) AND the
-      trailing-window date bound;
+    * the ledger is read ONE MONTH PER REQUEST (`ge <start> and lt <next>`),
+      never as one unbounded walk — this tenant's server paging can dump an
+      entire table in a single response;
+    * every window's $filter carries every configured Entry_Type (Kiwiplan
+      usage posts as 'Negative Adjmt.'; 'Consumption' kept for a later switch);
     * quantities are netted SIGNED per (item, month) then flipped, so a
       reversal (+2000) offsets its posting instead of adding to usage;
     * a month whose corrections outweigh usage clamps to zero."""
-    captured = {}
+    import re
+
+    LEDGER = [
+        {"Item_No": "WTL175", "Posting_Date": "2026-06-05", "Quantity": -2444},
+        {"Item_No": "WTL175", "Posting_Date": "2026-06-09", "Quantity": -2440},
+        {"Item_No": "WTL175", "Posting_Date": "2026-06-20", "Quantity": 2000},
+        {"Item_No": "BX186", "Posting_Date": "2026-05-02", "Quantity": -459},
+        {"Item_No": "BX186", "Posting_Date": "2026-04-01", "Quantity": 500},
+    ]
+    filters: list[str] = []
 
     def _get(url, params=None, session=None):
-        if params is not None:
-            captured.update(params)
-        return {"value": [
-            {"Item_No": "WTL175", "Posting_Date": "2026-06-05", "Quantity": -2444},
-            {"Item_No": "WTL175", "Posting_Date": "2026-06-09", "Quantity": -2440},
-            {"Item_No": "WTL175", "Posting_Date": "2026-06-20", "Quantity": 2000},
-            {"Item_No": "BX186", "Posting_Date": "2026-05-02", "Quantity": -459},
-            {"Item_No": "BX186", "Posting_Date": "2026-04-01", "Quantity": 500},
-        ]}
+        flt = (params or {}).get("$filter", "")
+        filters.append(flt)
+        m = re.search(r"Posting_Date ge (\S+) and Posting_Date lt (\S+)", flt)
+        assert m, f"every request must be month-windowed, got: {flt}"
+        start, end = m.group(1), m.group(2)
+        return {"value": [r for r in LEDGER if start <= r["Posting_Date"] < end]}
 
     monkeypatch.setattr(settings, "use_fake_adapters", False)
     monkeypatch.setattr(settings, "bc_base_url", "http://bc")
     monkeypatch.setattr(settings, "bc_username", "u")
     monkeypatch.setattr(settings, "bc_password", "p")
+    # Pin the trailing window so the fixture ledger dates stay inside it forever
+    # (get_usage_entries imports trailing_periods from gateway.planning).
+    from app.gateway import planning as gw_planning
+    monkeypatch.setattr(
+        gw_planning, "trailing_periods",
+        lambda n, today=None: [f"2026-{m:02d}" for m in range(7 - n, 7)],
+    )
     adapter = bc.BCAdapter()
     monkeypatch.setattr(adapter, "_company_url", lambda: "")
     monkeypatch.setattr(adapter, "_get", _get)
 
-    rows = adapter.get_usage_entries()
-    flt = captured["$filter"]
-    assert "Entry_Type eq 'Negative Adjmt.'" in flt
-    assert "Entry_Type eq 'Consumption'" in flt
-    assert "Posting_Date ge " in flt
+    rows = adapter.get_usage_entries(months=6)  # windows 2026-01 .. 2026-06
+    assert len(filters) == 6                    # one request per trailing month
+    assert all("Entry_Type eq 'Negative Adjmt.'" in f for f in filters)
+    assert all("Entry_Type eq 'Consumption'" in f for f in filters)
 
     by_key = {(r["sku"], r["period"]): r["quantity"] for r in rows}
     assert by_key[("WTL175", "2026-06")] == 2444 + 2440 - 2000   # reversal nets off
