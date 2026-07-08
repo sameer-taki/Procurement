@@ -47,52 +47,64 @@ def system_status() -> list[dict]:
     ]
 
 
+# One sync writes this many rows per commit, then expunges — so a large master
+# (GML's is ~13k items) never holds the whole set + all pending writes in memory
+# at once. Sized to keep the `sku IN (...)` existence query comfortably small.
+SYNC_BATCH = 500
+
+
 def sync_items(session: Session) -> int:
-    """Upsert the item master from BC (incl. cached price). Returns item count."""
-    rows = bc.list_items()
+    """Upsert the item master from BC (incl. cached price). Returns item count.
+
+    Streamed in batches so a large master stays memory-flat, and the price comes
+    straight from the master row (Unit_Price via $select) — NO per-item price
+    call. The old per-item fallback fired a BC round-trip per priceless item and,
+    with every SELECT autoflushing a growing pending set, was O(n^2) work that
+    OOM'd the container on GML's ~13k-item master. Rows BC returns with a blank
+    No are skipped (BC emits one at the top of the list)."""
+    rows = [r for r in bc.list_items() if r.get("sku")]
     now = datetime.utcnow()
-    # One query for all existing items instead of a SELECT per SKU — at 5000+
-    # items the per-row lookup dominated the 30-min refresh loop.
-    existing = {
-        it.sku: it for it in session.exec(select(Item)).all()
-    }
-    for r in rows:
-        item = existing.get(r["sku"])
-        if item is None:
-            item = Item(sku=r["sku"], name=r["name"], item_type=ItemType(r["item_type"]))
-        item.name = r["name"]
-        item.item_type = ItemType(r["item_type"])
-        item.uom = r.get("uom", "EA")
-        item.bc_item_no = r.get("bc_item_no")
-        item.kiwiplan_ref = r.get("kiwiplan_ref")
-        item.accura_ref = r.get("accura_ref")
-        item.is_purchased = r.get("is_purchased", False)
-        item.is_made = r.get("is_made", False)
-        item.reorder_point = r.get("reorder_point")
-        item.lead_time_days = r.get("lead_time_days")
-        # Paper attributes (SOP §3): stock is planned by grade AND deckle. BC
-        # owns them, but only overwrite when the adapter actually supplies a
-        # value — live _map_item returns None until the BC field mapping is
-        # confirmed (INTEGRATIONS.md), and blanking grade on the first live sync
-        # would silently empty the entire Order Page.
-        if r.get("grade") is not None:
-            item.grade = r.get("grade")
-        if r.get("deckle_mm") is not None:
-            item.deckle_mm = r.get("deckle_mm")
-        # Price comes with the master row when available; fall back to a per-item
-        # lookup only if it doesn't.
-        price = r.get("sales_price")
-        if price is None:
-            try:
-                price = bc.get_item_price(r["sku"])
-            except Exception:
-                price = None
-        if price is not None:
-            item.sales_price = price
-            item.price_synced_at = now
-        session.add(item)
-    session.commit()
-    return len(rows)
+    count = 0
+    for start in range(0, len(rows), SYNC_BATCH):
+        chunk = rows[start:start + SYNC_BATCH]
+        existing = {
+            it.sku: it
+            for it in session.exec(
+                select(Item).where(Item.sku.in_([r["sku"] for r in chunk]))
+            ).all()
+        }
+        for r in chunk:
+            item = existing.get(r["sku"])
+            if item is None:
+                item = Item(sku=r["sku"], name=r["name"], item_type=ItemType(r["item_type"]))
+            item.name = r["name"]
+            item.item_type = ItemType(r["item_type"])
+            item.uom = r.get("uom", "EA")
+            item.bc_item_no = r.get("bc_item_no")
+            item.kiwiplan_ref = r.get("kiwiplan_ref")
+            item.accura_ref = r.get("accura_ref")
+            item.is_purchased = r.get("is_purchased", False)
+            item.is_made = r.get("is_made", False)
+            item.reorder_point = r.get("reorder_point")
+            item.lead_time_days = r.get("lead_time_days")
+            # Paper attributes (SOP §3): stock is planned by grade AND deckle. BC
+            # owns them, but only overwrite when the adapter actually supplies a
+            # value — live _map_item returns None until the BC field mapping is
+            # confirmed (INTEGRATIONS.md), and blanking grade on the first live
+            # sync would silently empty the entire Order Page.
+            if r.get("grade") is not None:
+                item.grade = r.get("grade")
+            if r.get("deckle_mm") is not None:
+                item.deckle_mm = r.get("deckle_mm")
+            price = r.get("sales_price")
+            if price is not None:
+                item.sales_price = price
+                item.price_synced_at = now
+            session.add(item)
+            count += 1
+        session.commit()
+        session.expunge_all()   # release the batch; keep memory flat
+    return count
 
 
 def seed_vendors(session: Session) -> int:
@@ -214,32 +226,49 @@ def sync_vendor_prices(session: Session) -> int:
     if bc.use_fakes:
         return 0
     rows = bc.list_vendor_prices()
-    vendors_by_no = {
-        v.bc_vendor_no: v
-        for v in session.exec(select(Vendor)).all() if v.bc_vendor_no
-    }
-    items_by_sku = {it.sku: it for it in session.exec(select(Item)).all()}
-    existing = {
-        (vp.vendor_id, vp.item_id): vp
-        for vp in session.exec(select(VendorPrice)).all()
-    }
-    count = 0
+    # ID-only lookups (not ORM objects) so a large item master doesn't blow memory
+    # here — GML's is ~13k items and the old {sku: Item} map was the hog.
+    vendor_id_by_no = dict(
+        session.exec(select(Vendor.bc_vendor_no, Vendor.id)).all()
+    )
+    item_id_by_sku = dict(session.exec(select(Item.sku, Item.id)).all())
+    # Resolve to (vendor_id, item_id, row) up front, dropping rows we don't carry.
+    resolved = []
     for r in rows:
-        vendor = vendors_by_no.get(r.get("vendor_no"))
-        item = items_by_sku.get(r.get("sku"))
-        if vendor is None or item is None:
-            continue
-        vp = existing.get((vendor.id, item.id))
-        if vp is None:
-            vp = VendorPrice(vendor_id=vendor.id, item_id=item.id, price=r["price"])
-            existing[(vendor.id, item.id)] = vp
-        vp.price = r["price"]
-        vp.moq = r.get("moq")
-        if r.get("lead_time_days") is not None:
-            vp.lead_time_days = r["lead_time_days"]
-        session.add(vp)
-        count += 1
-    session.commit()
+        vid = vendor_id_by_no.get(r.get("vendor_no"))
+        iid = item_id_by_sku.get(r.get("sku"))
+        if vid and iid:
+            resolved.append((vid, iid, r))
+
+    count = 0
+    for start in range(0, len(resolved), SYNC_BATCH):
+        chunk = resolved[start:start + SYNC_BATCH]
+        # Over-fetch existing prices for the batch's vendors×items (bounded), then
+        # match exactly in Python — avoids a per-row SELECT and composite-key IN
+        # (which SQLite, used in tests, doesn't support).
+        item_ids = {iid for _, iid, _ in chunk}
+        vendor_ids = {vid for vid, _, _ in chunk}
+        existing = {
+            (vp.vendor_id, vp.item_id): vp
+            for vp in session.exec(
+                select(VendorPrice).where(
+                    VendorPrice.item_id.in_(item_ids),
+                    VendorPrice.vendor_id.in_(vendor_ids),
+                )
+            ).all()
+        }
+        for vid, iid, r in chunk:
+            vp = existing.get((vid, iid))
+            if vp is None:
+                vp = VendorPrice(vendor_id=vid, item_id=iid, price=r["price"])
+            vp.price = r["price"]
+            vp.moq = r.get("moq")
+            if r.get("lead_time_days") is not None:
+                vp.lead_time_days = r["lead_time_days"]
+            session.add(vp)
+            count += 1
+        session.commit()
+        session.expunge_all()
     return count
 
 

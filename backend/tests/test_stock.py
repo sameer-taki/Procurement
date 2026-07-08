@@ -34,6 +34,41 @@ def test_unknown_sku_404(admin_client):
     assert admin_client.get("/api/stock/NOPE").status_code == 404
 
 
+def test_sync_items_batches_skips_blank_and_no_per_item_price(engine, monkeypatch):
+    """sync_items streams in batches, skips BC's blank-No row, takes the price
+    from the master row, and never makes a per-item price call (the O(n^2)
+    autoflush path that OOM'd the ~13k-item live sync)."""
+    from sqlmodel import Session, select
+
+    from app.domain import stock_service as ss
+    from app.gateway.models import Item
+
+    rows = [
+        {"sku": "", "name": "blank", "item_type": "MATERIAL"},          # skipped
+        {"sku": "P1", "name": "Paper 1", "item_type": "MATERIAL", "uom": "KG", "sales_price": 1.5},
+        {"sku": "P2", "name": "Paper 2", "item_type": "MATERIAL", "sales_price": None},
+        {"sku": "P3", "name": "Paper 3", "item_type": "FINISHED", "sales_price": 2.0},
+    ]
+
+    def boom(*a, **k):
+        raise AssertionError("get_item_price must not be called during bulk sync")
+
+    monkeypatch.setattr(ss.bc, "list_items", lambda: [dict(r) for r in rows])
+    monkeypatch.setattr(ss.bc, "get_item_price", boom)
+    monkeypatch.setattr(ss, "SYNC_BATCH", 2)               # force >1 batch
+
+    with Session(engine) as s:
+        n = ss.sync_items(s)
+        assert n == 3                                       # blank-No row skipped
+        got = {
+            it.sku: it for it in
+            s.exec(select(Item).where(Item.sku.in_(["P1", "P2", "P3"]))).all()
+        }
+        assert got["P1"].sales_price == 1.5
+        assert got["P2"].sales_price is None                # no per-item fallback
+        assert got["P3"].item_type.value == "FINISHED"
+
+
 def test_refresh_single(admin_client):
     r = admin_client.post("/api/stock/INK-FLEXO-CYAN/refresh")
     assert r.status_code == 200
