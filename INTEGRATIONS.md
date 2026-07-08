@@ -101,6 +101,38 @@ best-effort (the documented double-post risk) — run receipts with a read-only 
 account until the field is confirmed and set. PO posting has no such gap and is
 safe to enable regardless.
 
+### GML BC140 tenant findings (verified live, 2026-07)
+
+Everything below was confirmed against the real test tenant; the adapter already
+accounts for all of it. Recorded so nobody re-diagnoses:
+
+* **Paging: keyset only.** The tenant **ignores `$skip`** (every page returns row
+  0 again) and its server-driven `@odata.nextLink` paging can return the whole
+  table in one response. All large reads page with `$orderby=No` + `$top` +
+  `No gt '<last>'` (`BC_PAGE_SIZE`, default 500). Never trust `$skip` here.
+* **`$select` needs `$top`** to be reliable, and the item read must `$select`
+  explicitly or BC computes the `Inventory` flowfield per row and times out.
+* **Fields not on the published pages** (each 400s if selected; the adapter
+  falls back automatically): `Reorder_Point`, `Lead_Time_Calculation`,
+  `External_Document_No` on the PO page, `E_Mail` on Vendor/Customer List,
+  `Your_Reference` on PO/receipt. Hence the live env mapping:
+  `BC_PO_EXTREF_FIELD=Vendor_Shipment_No`,
+  `BC_RECEIPT_CORRELATION_FIELD=Vendor_Order_No` (both verified blank/free).
+  Vendor + customer emails sync as None until the pages expose E_Mail.
+* **Masters are big and general-purpose:** ~13k items (all inventory, not just
+  paper), ~1.6k vendors, ~0.9k customers. Item master syncs stream in batches
+  (`SYNC_BATCH`) with no per-item price calls.
+* **`Purchase_Prices` starts empty** — GML doesn't maintain BC purchase price
+  lists. Vendor selection needs at least one row per material (Purchase Prices
+  page, or POST via the web service). Entering lines on the standalone Purchase
+  Prices page is fiddly (filter controls) — use the Vendor card → Purchases →
+  Prices route.
+* **Companies:** the DB hosts 14 companies (CRONUS demo, old GML copies…).
+  Data entered in the wrong company is invisible to the app — `BC_COMPANY`
+  must be `Golden Manufacturers Pte Ltd` and BC-side entry must happen there.
+* **First live write proven** 2026-07-08: PO + price-row inserts accepted
+  (`GML\administrator`), FK validation active.
+
 ### Paper planning: the usage export + grade/deckle
 
 The Order Page (paper planning per the procurement SOP) needs two more reads.

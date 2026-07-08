@@ -113,3 +113,22 @@ Do NOT rotate `DB_PASSWORD` — it is permanent for the life of `pgdata`.
 - `DB_PASSWORD` is permanent once `pgdata` exists. Secrets only in Portainer.
 - Hostnames/labels use `gml.com.fj`; the mail identity `no-reply@golden.com.fj`
   is a different domain on purpose.
+
+## 9. GitOps settings that MUST hold (diagnosed 2026-07 — cost a full day)
+
+Symptom when violated: the app container is silently killed and recreated every
+1–5 minutes (`docker events` shows compose `create → kill → destroy → rename`),
+long-running work dies with exit 137, `docker logs` only ever shows fresh boot
+lines. There is no crash and no OOM — the stack is being *redeployed*.
+
+1. **"Re-pull image" OFF** on this stack. The image is **built locally** (no
+   registry), and the build is not byte-reproducible (`apt-get` layers change),
+   so re-pull/rebuild-on-poll produces a "new" image every poll and replaces the
+   container even with zero commits. Redeploys must be driven by commits only
+   ("Force redeployment" also OFF; polling 5m or webhook is fine).
+2. **No two stacks may share an image name.** A second stack (`fibermold`) whose
+   compose also said `image: procurement-app` re-tagged the image on ITS polls,
+   which made THIS stack's container look stale and get replaced. Every
+   locally-built stack needs its own unique `image:` name.
+3. The healthcheck + `docker exec` share the container's cgroup — when hunting
+   kills, check `docker events` and `sudo dmesg` BEFORE assuming OOM or a crash.
