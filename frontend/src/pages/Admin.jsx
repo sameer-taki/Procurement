@@ -4,8 +4,8 @@ import { api } from '../api.js'
 import { useAuth } from '../auth.jsx'
 import { num, relativeTime } from '../format.js'
 import {
-  ROLE_CODES, fmtLimit, integrationBadge, isLastActiveAdmin, outboxBadge,
-  parseLimit,
+  ROLE_CODES, fmtLimit, gradePreviewVerdict, integrationBadge, isLastActiveAdmin,
+  outboxBadge, parseLimit, purgeSummaryLines,
 } from '../admin.js'
 
 // Admin panel: user/role management + system health. The backend enforces the
@@ -212,6 +212,9 @@ export default function Admin() {
         </section>
       </div>
 
+      <GradePreviewCard setUser={setUser} />
+      <PurgeCard setUser={setUser} onPurged={load} />
+
       <section className="card">
         <h2>
           Integration outbox{' '}
@@ -249,5 +252,144 @@ export default function Admin() {
         )}
       </section>
     </div>
+  )
+}
+
+// Dry-run a candidate BC_PAPER_SKU_REGEX against the real synced master before
+// touching env. The verdict line calls out the classic trap: a pattern that
+// matches but captures no grade (missing parentheses) grades nothing on resync.
+function GradePreviewCard({ setUser }) {
+  const [regex, setRegex] = useState('^([A-Z]{2,4}\\d{2,3})$')
+  const [result, setResult] = useState(null)
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  async function run(e) {
+    e.preventDefault()
+    setError('')
+    setBusy(true)
+    try {
+      setResult(await api.get(`/api/planning/grade-preview?regex=${encodeURIComponent(regex)}`))
+    } catch (err) {
+      if (err.status === 401) setUser(null)
+      else { setResult(null); setError(err.message) }
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const graded = result ? (result.match_count ?? 0) - (result.ungraded_matches ?? 0) : 0
+
+  return (
+    <section className="card">
+      <h2>
+        Paper grade preview{' '}
+        <span className="muted small thin">
+          test a BC_PAPER_SKU_REGEX against the synced item master before setting it
+        </span>
+      </h2>
+      <form onSubmit={run} className="filters">
+        <input
+          className="input"
+          style={{ maxWidth: 420, fontFamily: 'ui-monospace, Menlo, monospace' }}
+          value={regex}
+          onChange={(e) => setRegex(e.target.value)}
+          placeholder={'e.g. ^([A-Z]{2,4}\\d{2,3})$'}
+        />
+        <button className="btn btn-primary" type="submit" disabled={busy || !regex.trim()}>
+          {busy ? 'Scanning…' : 'Preview'}
+        </button>
+      </form>
+      {error && <div className="error">{error}</div>}
+      {result && (
+        <>
+          <p className={graded === 0 ? 'warn' : ''}>{gradePreviewVerdict(result)}</p>
+          {result.grades.length > 0 && (
+            <p>
+              {result.grades.slice(0, 30).map((g) => <span key={g} className="chip">{g}</span>)}
+              {result.grades.length > 30 && (
+                <span className="muted small"> …and {num(result.grades.length - 30)} more</span>
+              )}
+            </p>
+          )}
+          {result.sample.length > 0 && (
+            <table className="table">
+              <thead>
+                <tr><th>SKU</th><th>Name</th><th>Grade</th><th className="r">Deckle (mm)</th></tr>
+              </thead>
+              <tbody>
+                {result.sample.slice(0, 15).map((m) => (
+                  <tr key={m.sku}>
+                    <td>{m.sku}</td>
+                    <td>{m.name}</td>
+                    <td><span className="chip">{m.grade}</span></td>
+                    <td className="r">{m.deckle_mm ?? '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+          <p className="muted small">
+            Looks right? Set <code>BC_PAPER_SKU_REGEX</code> to this pattern in Portainer and
+            redeploy — the next item sync assigns the grades and the Order Page picks them up.
+            Currently graded items: {num(result.items_currently_graded)} / {num(result.total_items)}.
+          </p>
+        </>
+      )}
+    </section>
+  )
+}
+
+// One-shot demo-catalog cleanup once live BC data is synced. The backend
+// refuses in demo mode and never touches rows referenced by real orders.
+function PurgeCard({ setUser, onPurged }) {
+  const [summary, setSummary] = useState(null)
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  async function purge() {
+    if (!window.confirm(
+      'Remove the demo catalog (demo items, vendors, customers, prices, BOMs, forecasts)? '
+      + 'Rows referenced by real requisitions or POs are kept. This cannot be undone.',
+    )) return
+    setError('')
+    setBusy(true)
+    try {
+      const res = await api.post('/api/admin/purge-demo-data')
+      setSummary(res)
+      onPurged()
+    } catch (err) {
+      if (err.status === 401) setUser(null)
+      else setError(err.message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <section className="card">
+      <h2>
+        Demo data{' '}
+        <span className="muted small thin">
+          remove the built-in demo catalog once live BC data is synced
+        </span>
+      </h2>
+      {error && <div className="error">{error}</div>}
+      {summary ? (
+        <div className="banner">
+          {purgeSummaryLines(summary).map((line) => <div key={line}>{line}</div>)}
+        </div>
+      ) : (
+        <div className="form-actions">
+          <button className="btn btn-danger" onClick={purge} disabled={busy}>
+            {busy ? 'Purging…' : 'Purge demo data'}
+          </button>
+        </div>
+      )}
+      <p className="muted small">
+        Only works with live BC configured (in demo mode the seed would put it straight back).
+        Audited; safe to run more than once.
+      </p>
+    </section>
   )
 }

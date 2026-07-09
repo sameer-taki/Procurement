@@ -3,10 +3,12 @@ import {
   ROLE_CODES,
   canAdmin,
   fmtLimit,
+  gradePreviewVerdict,
   integrationBadge,
   isLastActiveAdmin,
   outboxBadge,
   parseLimit,
+  purgeSummaryLines,
 } from './admin.js'
 
 describe('canAdmin', () => {
@@ -62,5 +64,42 @@ describe('isLastActiveAdmin', () => {
   it('covers all role codes in the picker', () => {
     expect(ROLE_CODES).toContain('ADMIN')
     expect(ROLE_CODES).toHaveLength(5)
+  })
+})
+
+describe('gradePreviewVerdict', () => {
+  it('flags the no-capture-group trap loudly', () => {
+    const v = gradePreviewVerdict({
+      total_items: 13000, match_count: 6, ungraded_matches: 6, distinct_grades: 0,
+    })
+    expect(v).toMatch(/NONE would gain a grade/)
+    expect(v).toMatch(/capture group/)
+  })
+  it('summarises a healthy preview, noting partial captures', () => {
+    const v = gradePreviewVerdict({
+      total_items: 13000, match_count: 40, ungraded_matches: 4, distinct_grades: 12,
+    })
+    expect(v).toMatch(/36 of 13000 items would gain a grade \(12 grades\)/)
+    expect(v).toMatch(/4 match without capturing/)
+  })
+  it('handles zero matches and empty input', () => {
+    expect(gradePreviewVerdict({ total_items: 10, match_count: 0 })).toMatch(/No SKUs match/)
+    expect(gradePreviewVerdict(null)).toBe('')
+  })
+})
+
+describe('purgeSummaryLines', () => {
+  it('one removed-counts line, plus kept lines only when non-empty', () => {
+    const lines = purgeSummaryLines({
+      items: 18, vendors: 4, customers: 4, vendor_prices: 20, boms: 3,
+      forecasts: 3, usage_rows: 36, skipped_items: ['BOARD-200K'], skipped_vendors: [],
+    })
+    expect(lines).toHaveLength(2)
+    expect(lines[0]).toMatch(/Removed 18 items, 4 vendors, 4 customers/)
+    expect(lines[1]).toMatch(/Kept \(referenced by orders\): BOARD-200K/)
+  })
+  it('empty input -> no lines; missing counts default to 0', () => {
+    expect(purgeSummaryLines(null)).toEqual([])
+    expect(purgeSummaryLines({})[0]).toMatch(/Removed 0 items/)
   })
 })

@@ -1,14 +1,23 @@
 """M365 Graph mailer — client-credentials sendMail as no-reply@golden.com.fj.
 Uses the existing 'Golden Apps Mailer' app registration (Mail.Send, scoped via
-an Exchange application access policy). TODO: cache the token until expiry."""
+an Exchange application access policy). The client-credentials token is cached
+until shortly before expiry — one token round-trip per hour, not per email."""
 import logging
 import re
+import threading
+import time
 
 import httpx
 
 from .config import settings
 
 log = logging.getLogger("golden.procurement.mailer")
+
+# Refresh this many seconds BEFORE the token's stated expiry, so a token that is
+# about to lapse is never handed to sendMail.
+_TOKEN_SKEW_S = 120
+_token_lock = threading.Lock()
+_token_cache: dict = {"value": None, "expires_at": 0.0}
 
 # Conservative single-address validation: no whitespace/control chars, exactly one
 # '@', a non-empty local part, and a dotted domain. We are not trying to be RFC-5322
@@ -26,7 +35,8 @@ def _valid_email(addr: str) -> bool:
     return bool(_EMAIL_RE.match(addr))
 
 
-def _token() -> str:
+def _fetch_token() -> tuple:
+    """(access_token, expires_in_seconds) from the Entra token endpoint."""
     r = httpx.post(
         f"https://login.microsoftonline.com/{settings.graph_tenant_id}/oauth2/v2.0/token",
         data={
@@ -38,7 +48,26 @@ def _token() -> str:
         timeout=20,
     )
     r.raise_for_status()
-    return r.json()["access_token"]
+    body = r.json()
+    return body["access_token"], float(body.get("expires_in") or 0)
+
+
+def _token() -> str:
+    """Cached client-credentials token, refreshed _TOKEN_SKEW_S before expiry.
+    Lock held across the fetch so concurrent senders (request thread + outbox
+    scheduler) share one refresh instead of racing the token endpoint. A failed
+    refresh raises to the caller (notify() already contains mail errors)."""
+    now = time.monotonic()
+    with _token_lock:
+        if _token_cache["value"] and now < _token_cache["expires_at"]:
+            return _token_cache["value"]
+        value, expires_in = _fetch_token()
+        # A token with no/short expiry is used once but never cached.
+        _token_cache["value"] = value
+        _token_cache["expires_at"] = (
+            now + expires_in - _TOKEN_SKEW_S if expires_in > _TOKEN_SKEW_S else 0.0
+        )
+        return value
 
 
 def send_mail(to: list[str], subject: str, html: str) -> None:

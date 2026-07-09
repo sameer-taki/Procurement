@@ -24,10 +24,10 @@ export default function Login() {
   }
 
   return (
-    <div className="center">
+    <div className="login-wrap">
       <div className="card login">
         <div className="brand big"><span className="logo">◆</span> Golden Procurement</div>
-        <p className="muted">Sign in to view stock, requisitions and purchasing.</p>
+        <p className="muted">Stock · requisitions · purchasing · paper planning</p>
 
         {providers.entra && (
           <a className="btn btn-primary block" href="/auth/login">

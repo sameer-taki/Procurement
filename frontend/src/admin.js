@@ -51,3 +51,39 @@ export function isLastActiveAdmin(user, users = []) {
     (u) => u.id !== user.id && u.role === 'ADMIN' && u.active,
   )
 }
+
+// Grade-preview response -> the one-line verdict the operator reads first.
+// The trap this surfaces: a pattern can MATCH SKUs yet grade none of them
+// (no capture group), and the resync would then classify nothing.
+export function gradePreviewVerdict(body) {
+  if (!body) return ''
+  const graded = (body.match_count ?? 0) - (body.ungraded_matches ?? 0)
+  if ((body.match_count ?? 0) === 0) {
+    return 'No SKUs match this pattern.'
+  }
+  if (graded === 0) {
+    return `${body.match_count} SKUs match but NONE would gain a grade — add a capture group ( ) around the grade part.`
+  }
+  let s = `${graded} of ${body.total_items} items would gain a grade (${body.distinct_grades} grades).`
+  if ((body.ungraded_matches ?? 0) > 0) {
+    s += ` ${body.ungraded_matches} match without capturing a grade.`
+  }
+  return s
+}
+
+// Purge summary -> compact display lines for the confirmation banner.
+export function purgeSummaryLines(summary) {
+  if (!summary) return []
+  const removed = `Removed ${summary.items ?? 0} items, ${summary.vendors ?? 0} vendors, `
+    + `${summary.customers ?? 0} customers, ${summary.vendor_prices ?? 0} prices, `
+    + `${summary.boms ?? 0} BOMs, ${summary.forecasts ?? 0} forecasts, `
+    + `${summary.usage_rows ?? 0} usage rows.`
+  const lines = [removed]
+  if ((summary.skipped_items || []).length) {
+    lines.push(`Kept (referenced by orders): ${summary.skipped_items.join(', ')}`)
+  }
+  if ((summary.skipped_vendors || []).length) {
+    lines.push(`Kept vendors (on purchase orders): ${summary.skipped_vendors.join(', ')}`)
+  }
+  return lines
+}

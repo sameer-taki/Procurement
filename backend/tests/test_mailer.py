@@ -49,3 +49,40 @@ def test_notify_sends_to_valid_recipient(monkeypatch):
     monkeypatch.setattr(mailer, "send_mail", _capture)
     assert mailer.notify(["  sales@pacific.com.fj  "], "S", "<p>x</p>") == "sent"
     assert captured["to"] == ["sales@pacific.com.fj"]    # trimmed
+
+
+def test_token_is_cached_until_near_expiry(monkeypatch):
+    """One token fetch is reused across sends until the skew window before
+    expiry; a short-lived token is never cached."""
+    mailer._token_cache["value"] = None
+    mailer._token_cache["expires_at"] = 0.0
+    calls = {"n": 0}
+
+    def _fetch():
+        calls["n"] += 1
+        return f"tok-{calls['n']}", 3600.0        # 1h token
+
+    monkeypatch.setattr(mailer, "_fetch_token", _fetch)
+    assert mailer._token() == "tok-1"
+    assert mailer._token() == "tok-1"             # served from cache
+    assert calls["n"] == 1
+
+    # Force the cache stale -> exactly one refresh.
+    mailer._token_cache["expires_at"] = 0.0
+    assert mailer._token() == "tok-2"
+    assert calls["n"] == 2
+
+
+def test_short_lived_token_is_not_cached(monkeypatch):
+    mailer._token_cache["value"] = None
+    mailer._token_cache["expires_at"] = 0.0
+    calls = {"n": 0}
+
+    def _fetch():
+        calls["n"] += 1
+        return f"tok-{calls['n']}", 30.0          # shorter than the skew window
+
+    monkeypatch.setattr(mailer, "_fetch_token", _fetch)
+    mailer._token()
+    mailer._token()
+    assert calls["n"] == 2                         # never cached, refetched each call
