@@ -675,11 +675,55 @@ def reconciliation_endpoint(
     return reconciliation(session)
 
 
+# Hard wall-clock budget for one grade-preview scan. The pattern is operator
+# input and Python's re has no timeout — a catastrophic-backtracking pattern
+# would otherwise pin a worker thread forever, so the scan runs in a child
+# process that is terminated at the deadline.
+GRADE_PREVIEW_TIMEOUT_S = 5.0
+
+
+def _grade_preview_scan(pattern: str, rows: list, conn) -> None:
+    """Child-process worker: run the candidate pattern over (sku, name) rows and
+    send the aggregate back over the pipe. Pure compute — no DB, no app state —
+    so terminating it on timeout leaks nothing. Module-level for picklability."""
+    import re as _re
+
+    from ..gateway.bc import parse_paper_match
+
+    compiled = _re.compile(pattern)
+    sample: list[dict] = []
+    grades: set = set()
+    match_count = 0
+    ungraded_matches = 0
+    for sku, name in rows:
+        m = compiled.match(sku or "")
+        if not m:
+            continue
+        match_count += 1
+        grade, deckle = parse_paper_match(m)
+        if not grade:
+            # Matches but captures no grade (no/empty group 1): the SYNC would
+            # leave this item ungraded — never report it as classified.
+            ungraded_matches += 1
+            continue
+        grades.add(grade)
+        if len(sample) < 50:
+            sample.append({"sku": sku, "name": name, "grade": grade, "deckle_mm": deckle})
+    conn.send({
+        "match_count": match_count,
+        "ungraded_matches": ungraded_matches,
+        "distinct_grades": len(grades),
+        "grades": sorted(grades)[:100],
+        "sample": sample,
+    })
+    conn.close()
+
+
 @router.get("/planning/grade-preview")
 def grade_preview_endpoint(
     regex: Optional[str] = None,
     session: Session = Depends(get_session),
-    _: CurrentUser = Depends(get_current_user),
+    user: CurrentUser = Depends(get_current_user),
 ):
     """Dry-run a candidate BC_PAPER_SKU_REGEX against the synced item master.
 
@@ -688,26 +732,29 @@ def grade_preview_endpoint(
     paper. This endpoint lets the operator test a pattern against the real 13k
     SKUs BEFORE setting the env var: it reports how many items would gain a
     grade, the distinct grades, and samples — including likely false positives
-    to trim. Same semantics as the sync (group 1 = grade, optional group 2 =
-    deckle). Read-only: applying the pattern is still the env change + a resync.
-    """
+    to trim. Semantics are shared with the sync via parse_paper_match (group 1 =
+    grade — a pattern with NO capture group grades nothing, reported as
+    ungraded_matches; optional group 2 = deckle). Read-only: applying the
+    pattern is still the env change + a resync. The scan runs in a killable
+    child process so a pathological pattern costs at most
+    GRADE_PREVIEW_TIMEOUT_S, not a pinned worker."""
+    import multiprocessing as mp
     import re as _re
 
+    _require_planner(user)
     pattern = regex if regex is not None else settings.bc_paper_sku_regex
     if not pattern or len(pattern) > 200:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
                             detail="Provide a regex of at most 200 characters")
     try:
-        compiled = _re.compile(pattern)
+        _re.compile(pattern)
     except _re.error as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
                             detail=f"Bad regex: {exc}")
 
-    sample: list[dict] = []
-    grades: set = set()
     total = 0
-    match_count = 0
     already_graded = 0
+    rows: list[tuple] = []
     # Scalars only (sku, name, grade) — never 13k ORM objects.
     for sku, name, grade in session.exec(
         select(Item.sku, Item.name, Item.grade)
@@ -715,31 +762,34 @@ def grade_preview_endpoint(
         total += 1
         if grade:
             already_graded += 1
-        m = compiled.match(sku or "")
-        if not m:
-            continue
-        match_count += 1
-        groups = m.groups()
-        g = groups[0] if groups else sku
-        deckle = None
-        if len(groups) > 1 and groups[1]:
-            try:
-                deckle = int(groups[1])
-            except (TypeError, ValueError):
-                deckle = None
-        grades.add(g)
-        if len(sample) < 50:
-            sample.append({"sku": sku, "name": name, "grade": g, "deckle_mm": deckle})
+        rows.append((sku, name))
+
+    try:
+        ctx = mp.get_context("fork")     # instant on Linux (prod + CI)
+    except ValueError:                   # pragma: no cover - non-fork platforms
+        ctx = mp.get_context()
+    parent_conn, child_conn = ctx.Pipe(duplex=False)
+    proc = ctx.Process(target=_grade_preview_scan, args=(pattern, rows, child_conn),
+                       daemon=True)
+    proc.start()
+    child_conn.close()
+    result = parent_conn.recv() if parent_conn.poll(GRADE_PREVIEW_TIMEOUT_S) else None
+    if result is None:
+        proc.terminate()
+        proc.join()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(f"Pattern took longer than {GRADE_PREVIEW_TIMEOUT_S:.0f}s over "
+                    f"{total} SKUs (possible catastrophic backtracking) — simplify it"),
+        )
+    proc.join()
 
     return {
         "regex": pattern,
         "configured_regex": settings.bc_paper_sku_regex,
         "total_items": total,
         "items_currently_graded": already_graded,
-        "match_count": match_count,
-        "distinct_grades": len(grades),
-        "grades": sorted(grades)[:100],
-        "sample": sample,
+        **result,
     }
 
 

@@ -269,6 +269,11 @@ def purge_demo_data(
         (reported back), so historical orders keep their rows;
       * live-mode syncs never re-seed (all seed_* no-op when BC is live), so
         the purge sticks.
+
+    Known benign race: if the 30-min stock refresh is mid-flight it may try to
+    write a snapshot for an item this purge just deleted — that refresh errors,
+    is logged, and self-heals on its next tick (demo items never come back:
+    they don't exist in BC). Run the purge once, any time; no lock needed.
     """
     from sqlmodel import delete
 

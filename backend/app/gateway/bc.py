@@ -38,6 +38,23 @@ def _odata_str(value) -> str:
     return str(value or "").replace("'", "''")
 
 
+def parse_paper_match(m) -> tuple:
+    """(grade, deckle_mm) from a paper-SKU regex match — THE shared semantics
+    for both the item sync (_paper_attrs) and the grade-preview dry-run:
+    capture group 1 is the grade (a match with NO groups grades nothing),
+    optional group 2 is the deckle. Keeping this in one place is what makes the
+    preview's promise 'same semantics as the sync' structurally true."""
+    groups = m.groups()
+    grade = groups[0] if groups else None
+    deckle = None
+    if len(groups) > 1 and groups[1]:
+        try:
+            deckle = int(groups[1])
+        except (TypeError, ValueError):
+            deckle = None
+    return grade, deckle
+
+
 def _parse_dateformula_days(value) -> Optional[int]:
     """BC lead time is a dateformula string ('45D', '<2W>', '1M'); normalise to
     days. Unknown/blank shapes -> None (never guess a lead time)."""
@@ -136,18 +153,10 @@ class BCAdapter:
             return grade, deckle
         m = re.match(settings.bc_paper_sku_regex, no or "") if settings.bc_paper_sku_regex else None
         if m:
-            groups = m.groups()
-            grade = groups[0] if groups else None
             # The deckle group is OPTIONAL: GML's BC keys one item per GRADE
             # (item No 'WTL175', no deckle suffix — confirmed on BC140), so a
             # grade-only regex must parse cleanly with deckle left None.
-            deckle = None
-            if len(groups) > 1 and groups[1]:
-                try:
-                    deckle = int(groups[1])
-                except (TypeError, ValueError):
-                    deckle = None
-            return grade, deckle
+            return parse_paper_match(m)
         return None, None
 
     @staticmethod

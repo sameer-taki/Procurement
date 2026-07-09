@@ -89,14 +89,25 @@ def test_bc_usage_entries_live_windows_filter_and_signed_netting(monkeypatch):
         {"Item_No": "BX186", "Posting_Date": "2026-04-01", "Quantity": 500},
     ]
     filters: list[str] = []
+    continuations: list[str] = []
 
     def _get(url, params=None, session=None):
-        flt = (params or {}).get("$filter", "")
+        if params is None:
+            # A nextLink follow within a window (BC may page even a month).
+            continuations.append(url)
+            start, end = url.split("|")[1], url.split("|")[2]
+            rows = [r for r in LEDGER if start <= r["Posting_Date"] < end]
+            return {"value": rows[1:]}          # the rest of the window
+        flt = params.get("$filter", "")
         filters.append(flt)
         m = re.search(r"Posting_Date ge (\S+) and Posting_Date lt (\S+)", flt)
-        assert m, f"every request must be month-windowed, got: {flt}"
+        assert m, f"every windowed request must be month-bounded, got: {flt}"
         start, end = m.group(1), m.group(2)
-        return {"value": [r for r in LEDGER if start <= r["Posting_Date"] < end]}
+        rows = [r for r in LEDGER if start <= r["Posting_Date"] < end]
+        if len(rows) > 1:
+            # Serve the window in two pages to prove nextLink is followed.
+            return {"value": rows[:1], "@odata.nextLink": f"next|{start}|{end}"}
+        return {"value": rows}
 
     monkeypatch.setattr(settings, "use_fake_adapters", False)
     monkeypatch.setattr(settings, "bc_base_url", "http://bc")
@@ -114,7 +125,8 @@ def test_bc_usage_entries_live_windows_filter_and_signed_netting(monkeypatch):
     monkeypatch.setattr(adapter, "_get", _get)
 
     rows = adapter.get_usage_entries(months=6)  # windows 2026-01 .. 2026-06
-    assert len(filters) == 6                    # one request per trailing month
+    assert len(filters) == 6                    # one windowed request per month
+    assert continuations, "the June window pages via nextLink and must be followed"
     assert all("Entry_Type eq 'Negative Adjmt.'" in f for f in filters)
     assert all("Entry_Type eq 'Consumption'" in f for f in filters)
 

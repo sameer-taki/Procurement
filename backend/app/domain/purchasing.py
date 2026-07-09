@@ -1394,7 +1394,9 @@ def _refresh_received_items(session: Session, received_lines: list[dict]) -> lis
 @router.get("/vendors")
 def list_vendors(
     q: Optional[str] = Query(None),
-    limit: int = Query(200, ge=1, le=500),
+    # Default comfortably above the live master (~1.6k vendors) so the Vendors
+    # screen never silently truncates; the cap only guards runaway payloads.
+    limit: int = Query(5000, ge=1, le=10000),
     session: Session = Depends(get_session),
     _: CurrentUser = Depends(get_current_user),
 ):
