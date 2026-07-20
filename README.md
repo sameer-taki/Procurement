@@ -6,8 +6,11 @@ Integrates with Business Central (price/SKU, masters, PO, invoice), Kiwiplan
 (box production + stock), and Accura (labels + stock) through an internal gateway.
 
 - **Build guide for Claude Code:** see `CLAUDE.md` (read it first).
-- **Deploy:** Portainer GitOps on the Golden host — see `DEPLOY.md`. Merge to `main`
-  -> Portainer rebuilds & redeploys at `https://procurement.gml.com.fj`.
+- **Deploy (on-prem):** Portainer GitOps on the Golden host — see `DEPLOY.md`. Merge to
+  `main` -> Portainer rebuilds & redeploys at `https://procurement.gml.com.fj`.
+- **Deploy (cloud):** hybrid **Vercel** (UI) + **Supabase** (Postgres) + **Clerk** (auth,
+  Microsoft federated) + FastAPI backend on the **Azure VM** at `mcp.golden.com.fj` —
+  see `CLOUD_DEPLOY.md` and `docker-compose.cloud.yml`.
 
 ## Status
 All six build phases are shipped (deployed at `procurement.gml.com.fj`):

@@ -28,7 +28,11 @@ def _login_user(request: Request, user: User) -> None:
 @router.get("/providers")
 def providers():
     """What sign-in methods the SPA should offer."""
-    return {"entra": settings.entra_enabled, "admin_login": True}
+    return {
+        "clerk": settings.clerk_enabled,
+        "entra": settings.entra_enabled,
+        "admin_login": True,
+    }
 
 
 @router.get("/login")

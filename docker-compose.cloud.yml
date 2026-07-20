@@ -1,0 +1,135 @@
+# docker-compose.cloud.yml — CLOUD backend (Azure Linux VM)
+# ---------------------------------------------------------------------------
+# The cloud setup is a hybrid:
+#   • Frontend  → Vercel                       (see frontend/vercel.json)
+#   • Auth      → Clerk (Microsoft federated)  (CLERK_* below)
+#   • Database  → Supabase Postgres            (DATABASE_URL below)
+#   • Backend   → THIS compose, on the Azure Linux VM that is on the VPN to the
+#                 LAN (so BC/Kiwiplan/Accura stay reachable) and published at
+#                 https://mcp.golden.com.fj
+#
+# Differences from the on-prem docker-compose.traefik.yml:
+#   • no `db` service      — Supabase is the database
+#   • no `db-backup`       — Supabase manages backups (PITR/daily on the plan)
+#   • DATABASE_URL points at Supabase; Traefik host is mcp.golden.com.fj
+#   • unique image name (procurement-cloud-app) — never share an image name
+#     between stacks (on-prem guardrail: a shared name causes redeploy churn)
+#
+# Required env (set on the VM / in Portainer, never committed):
+#   APP_HOST, DATABASE_URL, SECRET_KEY, ADMIN_USERNAME, ADMIN_PASSWORD,
+#   CLERK_ISSUER (+ optional CLERK_SECRET_KEY), CORS_ORIGINS
+# See CLOUD_DEPLOY.md for the full runbook.
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: procurement-cloud-app          # unique per stack (do not share)
+    restart: unless-stopped
+    environment:
+      APP_ENV: "${APP_ENV:-production}"
+      # Supabase Postgres. Use the SESSION pooler (port 5432 on the pooler host)
+      # or the direct connection; NOT the transaction pooler (6543) — this app
+      # keeps a long-lived SQLAlchemy pool + prepared statements. Example:
+      #   postgresql+psycopg://postgres.<ref>:<pwd>@aws-0-ap-southeast-2.pooler.supabase.com:5432/postgres?sslmode=require
+      DATABASE_URL: "${DATABASE_URL:?}"
+      SECRET_KEY: "${SECRET_KEY:?}"
+      FIRST_ADMIN_USERNAME: "${ADMIN_USERNAME:?}"
+      FIRST_ADMIN_PASSWORD: "${ADMIN_PASSWORD:?}"
+      FIRST_ADMIN_NAME: "Administrator"
+      # --- Clerk auth (primary sign-in; Microsoft federated inside Clerk) ---
+      CLERK_ISSUER: "${CLERK_ISSUER:-}"                  # e.g. https://clerk.golden.com.fj
+      CLERK_JWKS_URL: "${CLERK_JWKS_URL:-}"              # optional; derived from issuer if blank
+      CLERK_SECRET_KEY: "${CLERK_SECRET_KEY:-}"          # optional; enables API user lookup
+      CLERK_AUTHORIZED_PARTIES: "${CLERK_AUTHORIZED_PARTIES:-}"  # your Vercel origin(s)
+      CLERK_ROLE_CLAIM: "${CLERK_ROLE_CLAIM:-role}"
+      # CLERK_ROLE_MAP: '{"proc-approvers":"APPROVER"}'  # JSON; optional explicit map
+      # --- CORS: the Vercel origin(s) allowed to call this API directly. Leave
+      #     blank if the frontend proxies same-origin via Vercel rewrites. ---
+      CORS_ORIGINS: "${CORS_ORIGINS:-}"
+      # --- integrations (over the VPN to the LAN; same vars as on-prem) ---
+      BC_BASE_URL: "${BC_BASE_URL:-}"
+      BC_COMPANY: "${BC_COMPANY:-}"
+      BC_USERNAME: "${BC_USERNAME:-}"
+      BC_PASSWORD: "${BC_PASSWORD:-}"
+      BC_AUTH: "${BC_AUTH:-ntlm}"
+      BC_VERIFY_TLS: "${BC_VERIFY_TLS:-true}"
+      BC_ITEMS_ENTITY: "${BC_ITEMS_ENTITY:-Items}"
+      BC_TIMEOUT_SECONDS: "${BC_TIMEOUT_SECONDS:-60}"
+      BC_PAGE_SIZE: "${BC_PAGE_SIZE:-500}"
+      BC_PO_ENTITY: "${BC_PO_ENTITY:-PurchaseOrders}"
+      BC_PO_LINES_ENTITY: "${BC_PO_LINES_ENTITY:-PurchaseOrderLines}"
+      BC_PO_EXTREF_FIELD: "${BC_PO_EXTREF_FIELD:-External_Document_No}"
+      BC_RECEIPT_ENTITY: "${BC_RECEIPT_ENTITY:-PurchRcptHeaders}"
+      BC_INVOICE_ENTITY: "${BC_INVOICE_ENTITY:-PurchInvHeaders}"
+      BC_USAGE_ENTITY: "${BC_USAGE_ENTITY:-ItemLedgerEntries}"
+      BC_VENDORS_ENTITY: "${BC_VENDORS_ENTITY:-Vendors}"
+      BC_CUSTOMERS_ENTITY: "${BC_CUSTOMERS_ENTITY:-Customers}"
+      BC_PURCHASE_PRICES_ENTITY: "${BC_PURCHASE_PRICES_ENTITY:-Purchase_Prices}"
+      BC_RECEIPT_POST_ACTION: "${BC_RECEIPT_POST_ACTION:-Microsoft.NAV.Post}"
+      BC_RECEIPT_CORRELATION_FIELD: "${BC_RECEIPT_CORRELATION_FIELD:-}"
+      BC_USAGE_ENTRY_TYPES: "${BC_USAGE_ENTRY_TYPES:-Negative Adjmt.,Consumption}"
+      BC_GRADE_FIELD: "${BC_GRADE_FIELD:-}"
+      BC_DECKLE_FIELD: "${BC_DECKLE_FIELD:-}"
+      BC_PAPER_SKU_REGEX: "${BC_PAPER_SKU_REGEX:-}"
+      BC_REORDER_POINT_FIELD: "${BC_REORDER_POINT_FIELD:-Reorder_Point}"
+      BC_LEAD_TIME_FIELD: "${BC_LEAD_TIME_FIELD:-Lead_Time_Calculation}"
+      BC_REPLENISHMENT_FIELD: "${BC_REPLENISHMENT_FIELD:-}"
+      CROSSWALK_MODE: "${CROSSWALK_MODE:-sku}"
+      BC_KIWIPLAN_REF_FIELD: "${BC_KIWIPLAN_REF_FIELD:-}"
+      BC_ACCURA_REF_FIELD: "${BC_ACCURA_REF_FIELD:-}"
+      KIWIPLAN_DSN: "${KIWIPLAN_DSN:-}"
+      KIWIPLAN_STOCK_SQL: "${KIWIPLAN_STOCK_SQL:-}"
+      ACCURA_DSN: "${ACCURA_DSN:-}"
+      ACCURA_STOCK_SQL: "${ACCURA_STOCK_SQL:-}"
+      AZURE_SQL_DSN: "${AZURE_SQL_DSN:-}"
+      STOCK_REFRESH_ENABLED: "${STOCK_REFRESH_ENABLED:-true}"
+      STOCK_REFRESH_SECONDS: "${STOCK_REFRESH_SECONDS:-1800}"
+      OUTBOX_PROCESS_ENABLED: "${OUTBOX_PROCESS_ENABLED:-true}"
+      OUTBOX_PROCESS_SECONDS: "${OUTBOX_PROCESS_SECONDS:-60}"
+      USAGE_IMPORT_ENABLED: "${USAGE_IMPORT_ENABLED:-true}"
+      USAGE_IMPORT_SECONDS: "${USAGE_IMPORT_SECONDS:-86400}"
+      GRAPH_TENANT_ID: "${GRAPH_TENANT_ID:-}"
+      GRAPH_CLIENT_ID: "${GRAPH_CLIENT_ID:-}"
+      GRAPH_CLIENT_SECRET: "${GRAPH_CLIENT_SECRET:-}"
+      GRAPH_SENDER: "${GRAPH_SENDER:-no-reply@golden.com.fj}"
+      # Entra vars stay supported for legacy/backup OIDC, but Clerk is the path now.
+      ENTRA_TENANT_ID: "${ENTRA_TENANT_ID:-}"
+      ENTRA_CLIENT_ID: "${ENTRA_CLIENT_ID:-}"
+      ENTRA_CLIENT_SECRET: "${ENTRA_CLIENT_SECRET:-}"
+      ENTRA_REDIRECT_URI: "${ENTRA_REDIRECT_URI:-}"
+    networks:
+      - web
+      - default
+    labels:
+      # Traefik on the VM terminates TLS and routes mcp.golden.com.fj → :8000.
+      # If the VM uses a different reverse proxy (nginx/caddy), drop these labels,
+      # uncomment `ports:` below, and point that proxy at 127.0.0.1:8000 instead.
+      - "traefik.enable=true"
+      - "traefik.docker.network=web"
+      - "traefik.http.routers.procurement-api.rule=Host(`${APP_HOST:?}`)"
+      - "traefik.http.routers.procurement-api.entrypoints=websecure"
+      - "traefik.http.routers.procurement-api.tls=true"
+      - "traefik.http.services.procurement-api.loadbalancer.server.port=8000"
+    # ports:
+    #   - "127.0.0.1:8000:8000"     # only if NOT using the Traefik labels above
+    mem_limit: 1g
+    cpus: "1.5"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+networks:
+  # Present when the VM runs Traefik on a shared external "web" network (same
+  # pattern as on-prem). If you use `ports:` instead, delete this whole block
+  # and the `web` entry under the service's networks.
+  web:
+    external: true
+  default:

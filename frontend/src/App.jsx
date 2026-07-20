@@ -1,6 +1,6 @@
 import React from 'react'
 import { BrowserRouter, NavLink, Navigate, Route, Routes, useLocation } from 'react-router-dom'
-import { AuthProvider, useAuth } from './auth.jsx'
+import { useAuth } from './auth.jsx'
 import Login from './pages/Login.jsx'
 import Dashboard from './pages/Dashboard.jsx'
 import Stock from './pages/Stock.jsx'
@@ -60,11 +60,8 @@ export function pageTitle(pathname, nav = NAV) {
 }
 
 export default function App() {
-  return (
-    <AuthProvider>
-      <Root />
-    </AuthProvider>
-  )
+  // The auth provider (Clerk vs local break-glass) is chosen in main.jsx.
+  return <Root />
 }
 
 function Root() {

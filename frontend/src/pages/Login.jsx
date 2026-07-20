@@ -1,4 +1,5 @@
 import React, { useState } from 'react'
+import { SignIn } from '@clerk/clerk-react'
 import { api } from '../api.js'
 import { useAuth } from '../auth.jsx'
 
@@ -8,6 +9,23 @@ export default function Login() {
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+
+  // Cloud auth: hand off to Clerk's hosted sign-in, which shows the configured
+  // connections (Microsoft/Entra) and any other enabled methods.
+  if (providers.clerk) {
+    return (
+      <div className="login-wrap">
+        <div className="card login">
+          <div className="brand big"><span className="logo">◆</span> Golden Procurement</div>
+          <p className="muted">Stock · requisitions · purchasing · paper planning</p>
+          <SignIn
+            routing="virtual"
+            appearance={{ elements: { rootBox: { width: '100%' }, card: { boxShadow: 'none' } } }}
+          />
+        </div>
+      </div>
+    )
+  }
 
   async function submit(e) {
     e.preventDefault()

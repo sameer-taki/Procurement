@@ -21,31 +21,13 @@ from sqlmodel import Session, select
 
 from ..config import settings
 from ..gateway.models import User
-
-ROLE_CODES = ["ADMIN", "APPROVER", "OFFICER", "REQUESTER", "VIEWER"]  # most→least privileged
+from .roles import ROLE_CODES, map_roles, role_for_claim_value
 
 
 def _role_for_claim_value(value: str) -> Optional[str]:
-    """Map one claim value to a role code, exact-match only. None if nothing matches.
-
-    1. An explicit configured mapping (settings.entra_role_map) wins — keyed by the
-       raw claim value or its GUID, compared case-insensitively. This is the
-       production path for opaque group GUIDs / arbitrary group names.
-    2. Otherwise the *whole* claim value must equal a canonical role code
-       (case-insensitive). This deliberately rejects names that merely contain a
-       role code as a substring ('Finance-Admins', 'Non-Admin-Users', 'GoldenAdmin'),
-       which is the privilege-escalation hole being closed.
-    """
-    norm = str(value).strip().upper()
-    role_map = getattr(settings, "entra_role_map", None) or {}
-    for key, code in role_map.items():
-        if str(key).strip().upper() == norm:
-            mapped = str(code).strip().upper()
-            if mapped in ROLE_CODES:
-                return mapped
-    if norm in ROLE_CODES:
-        return norm
-    return None
+    """Map one Entra claim value to a role code (exact-match only) via the shared
+    mapper, using settings.entra_role_map. See app.auth.roles for the guarantee."""
+    return role_for_claim_value(value, getattr(settings, "entra_role_map", None) or {})
 
 oauth = OAuth()
 _registered = False
@@ -70,7 +52,7 @@ def get_oauth() -> OAuth:
 
 
 def map_role(claims: dict) -> str:
-    """Pick the highest-privilege local role mapped from the configured claim.
+    """Pick the highest-privilege local role mapped from the configured Entra claim.
 
     Each claim value is resolved independently via an exact (explicit-map or
     whole-token) match — never substring containment — and the most privileged
@@ -79,11 +61,7 @@ def map_role(claims: dict) -> str:
     raw = claims.get(settings.entra_role_claim) or []
     if isinstance(raw, str):
         raw = [raw]
-    matched = {role for v in raw if (role := _role_for_claim_value(v)) is not None}
-    for code in ROLE_CODES:                          # ADMIN first, so it wins
-        if code in matched:
-            return code
-    return settings.default_role
+    return map_roles(raw, getattr(settings, "entra_role_map", None) or {}, settings.default_role)
 
 
 def upsert_user_from_claims(session: Session, claims: dict) -> Optional[User]:

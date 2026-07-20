@@ -5,7 +5,8 @@ psycopg[binary]==3.2.*
 pydantic-settings==2.4.*
 httpx==0.27.*
 authlib==1.3.*          # Entra OIDC
-cryptography>=42,<45    # authlib/msal dep — pin a range both accept
+pyjwt[crypto]==2.9.*    # Clerk session-JWT verification (RS256 via JWKS)
+cryptography>=42,<45    # authlib/msal + pyjwt[crypto] dep — pin a range all accept
 itsdangerous==2.2.*     # session signing
 alembic==1.13.*         # schema migrations
 pyodbc==5.1.*           # Accura ODBC

@@ -4,6 +4,7 @@ import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from sqlmodel import Session, select
@@ -118,8 +119,20 @@ app.add_middleware(
     session_cookie=settings.session_cookie,
     max_age=settings.session_max_age,
     https_only=settings.cookie_secure,
-    same_site="lax",
+    same_site=settings.session_same_site,
 )
+# CORS for the cross-origin cloud setup: the Vercel frontend calls this backend
+# (mcp.golden.com.fj) with a Clerk Bearer token. Only the configured browser
+# origins are allowed; when CORS_ORIGINS is blank (same-origin dev, or Vercel
+# rewrites proxying the API) this middleware is a no-op.
+if settings.cors_origin_list:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.cors_origin_list,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 
 @app.get("/health")

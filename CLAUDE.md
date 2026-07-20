@@ -93,6 +93,14 @@ This app deploys via **Portainer GitOps** on the Golden host. Push to `main` →
 - **Secrets only in Portainer env vars**, never committed. `.env.example` is documentation only.
 - Don't rename the Portainer stack/volume.
 
+> **Cloud deployment (alternative to the above):** a hybrid — Vercel (UI) +
+> Supabase (Postgres) + Clerk (auth, Microsoft federated) + the FastAPI backend on
+> the Azure VM at `mcp.golden.com.fj` (on the VPN, so BC/Kiwiplan/Accura stay
+> reachable). The guardrails in this section apply to the on-prem Portainer path;
+> the cloud path is documented in `CLOUD_DEPLOY.md` (`docker-compose.cloud.yml`,
+> `frontend/vercel.json`). The gateway still lives in-app and the app is still the
+> only writer of canonical state — §2 is unchanged.
+
 ## 6. Build phases (map onto KAN-37–42)
 
 Work one phase at a time; open a PR per phase; keep CI green. Each phase has a Definition of Done.

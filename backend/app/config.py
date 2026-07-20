@@ -160,6 +160,30 @@ class Settings(BaseSettings):
     entra_role_map: dict[str, str] = {}
     default_role: str = "VIEWER"
 
+    # Clerk (primary auth in the cloud setup). The frontend (on Vercel) signs
+    # users in via Clerk — with Microsoft/Entra federated as a Clerk enterprise
+    # connection — and sends the Clerk session JWT as a Bearer token; the backend
+    # verifies it against Clerk's JWKS and maps a role claim to a local role code
+    # via the SAME exact-match rule as Entra (app.auth.roles). When unset, auth
+    # falls back to the session-cookie paths (Entra OIDC / break-glass admin), so
+    # tests and on-prem keep working unchanged.
+    clerk_issuer: str = ""              # e.g. https://clerk.golden.com.fj (Clerk "Issuer")
+    clerk_jwks_url: str = ""            # defaults to {clerk_issuer}/.well-known/jwks.json
+    clerk_secret_key: str = ""         # optional: enables Clerk Backend API user lookup
+    clerk_authorized_parties: str = "" # comma-separated allowed "azp" (frontend origins)
+    clerk_role_claim: str = "role"     # session-token claim carrying the user's role(s)
+    clerk_role_map: dict[str, str] = {}
+
+    # Cross-origin: the Vercel frontend and this backend (mcp.golden.com.fj) are
+    # different origins. List the browser origins allowed to call the API here
+    # (comma-separated). Clerk auth is a Bearer header, so CORS alone suffices;
+    # leave blank when the frontend proxies same-origin (Vercel rewrites).
+    cors_origins: str = ""
+    # SameSite for the signed session cookie (break-glass admin / Entra legacy).
+    # 'lax' is right when that login happens on the backend's own origin; set
+    # 'none' (implies secure) only if you need the cookie to ride cross-site.
+    session_same_site: str = "lax"
+
     # --- capability helpers (never raise; safe to read anywhere) ---
     @property
     def is_production(self) -> bool:
@@ -172,6 +196,28 @@ class Settings(BaseSettings):
     @property
     def entra_enabled(self) -> bool:
         return bool(self.entra_tenant_id and self.entra_client_id and self.entra_client_secret)
+
+    @property
+    def clerk_enabled(self) -> bool:
+        """True once Clerk is configured (issuer or an explicit JWKS URL). When
+        false, Bearer-token auth is skipped and only the session-cookie paths run."""
+        return bool(self.clerk_issuer or self.clerk_jwks_url)
+
+    @property
+    def clerk_jwks(self) -> str:
+        """Resolved JWKS URL: explicit override, else derived from the issuer."""
+        if self.clerk_jwks_url:
+            return self.clerk_jwks_url
+        iss = self.clerk_issuer.rstrip("/")
+        return f"{iss}/.well-known/jwks.json" if iss else ""
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+    @property
+    def clerk_authorized_party_list(self) -> list[str]:
+        return [o.strip() for o in self.clerk_authorized_parties.split(",") if o.strip()]
 
     @property
     def bc_enabled(self) -> bool:

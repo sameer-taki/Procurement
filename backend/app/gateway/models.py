@@ -328,6 +328,7 @@ class User(SQLModel, table=True):
     __tablename__ = "users"
     id: str = Field(default_factory=uid, primary_key=True)
     entra_oid: Optional[str] = Field(default=None, index=True)
+    clerk_user_id: Optional[str] = Field(default=None, index=True)
     email: str = Field(index=True, unique=True)
     name: Optional[str] = None
     role_code: Optional[str] = Field(default=None, foreign_key="roles.code")
